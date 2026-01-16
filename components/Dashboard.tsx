@@ -18,12 +18,10 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, inventoryLevels, se
     .filter(t => t.type === TransactionType.INCOME)
     .reduce((acc, t) => acc + t.amount, 0);
 
-  // Cost of Goods Sold (Inventory Purchases)
   const cogs = transactions
     .filter(t => t.type === TransactionType.EXPENSE && t.category === Category.INVENTORY)
     .reduce((acc, t) => acc + t.amount, 0);
 
-  // Other Operating Expenses (Rent, Transport, etc)
   const opEx = transactions
     .filter(t => t.type === TransactionType.EXPENSE && t.category !== Category.INVENTORY)
     .reduce((acc, t) => acc + t.amount, 0);
@@ -44,7 +42,6 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, inventoryLevels, se
     .filter(([_, level]) => level <= lowStockThreshold)
     .sort((a, b) => a[1] - b[1]);
 
-  // Helper to suggest suppliers based on Nairobi market geography
   const getSupplierSuggestion = (item: string) => {
     const lowerItem = item.toLowerCase();
     if (lowerItem.includes('rice') || lowerItem.includes('sugar') || lowerItem.includes('maize') || lowerItem.includes('unga')) {
@@ -73,7 +70,6 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, inventoryLevels, se
 
   const handleLogRestock = (item: string, qty: number) => {
     const unitPrice = getLastUnitPrice(item);
-    // Fix: Add required 'baseItem' property to ensure compliance with Transaction type.
     const newTx: Transaction = {
       id: `restock-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       timestamp: Date.now(),
@@ -107,49 +103,41 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, inventoryLevels, se
 
   const exportAuditReport = () => {
     if (transactions.length === 0) {
-      alert("Hujarekodi chochote bado! Record transactions first to export a report.");
+      alert("Hujarekodi chochote bado!");
       return;
     }
 
-    const sortedTransactions = [...transactions].sort((a, b) => a.timestamp - b.timestamp);
+    const sortedTransactions = [...transactions].sort((a, b) => b.timestamp - a.timestamp);
 
     const reportData = [
       ["MARKETMINDER BUSINESS COMPLIANCE REPORT"],
-      ["Shop Name:", settings.shopName],
-      ["Location:", settings.location],
-      ["Export Date:", new Date().toLocaleString()],
+      ["Shop Name:", `"${settings.shopName.replace(/"/g, '""')}"`],
+      ["Location:", `"${settings.location.replace(/"/g, '""')}"`],
+      ["Export Date:", `"${new Date().toLocaleString().replace(/"/g, '""')}"`],
       [""],
       ["FINANCIAL SUMMARY"],
-      ["Total Revenue (Sales):", `${totalRevenue.toLocaleString()} KES`],
-      ["Cost of Goods Sold (Inventory):", `${cogs.toLocaleString()} KES`],
-      ["GROSS PROFIT:", `${grossProfit.toLocaleString()} KES`],
-      ["Operating Expenses (Rent/Trans):", `${opEx.toLocaleString()} KES`],
-      ["NET PROFIT/LOSS:", `${netProfit.toLocaleString()} KES`],
+      ["Total Revenue (Sales):", totalRevenue],
+      ["Cost of Goods Sold (Inventory):", cogs],
+      ["GROSS PROFIT:", grossProfit],
+      ["Operating Expenses (Rent/Trans):", opEx],
+      ["NET PROFIT/LOSS:", netProfit],
       ["Gross Margin:", `${grossMargin.toFixed(2)}%`],
-      ["Total Logs:", transactions.length],
       [""],
       ["DETAILED TRANSACTION LEDGER"],
-      ["ID", "Date (Timestamp)", "Item Description", "Type", "Category", "Quantity", "Unit Price", "Total Amount", "Currency", "Channel", "Audit Status"]
+      ["Date", "Item Description", "Type", "Category", "Quantity", "Unit Price", "Total Amount", "Source"]
     ];
 
     sortedTransactions.forEach(tx => {
-      const qty = tx.quantity || 1;
-      const up = tx.unitPrice || 0;
-      const displayAmount = (tx.amount === 0 && up > 0) ? (qty * up) : tx.amount;
-      const dateStr = new Date(tx.timestamp).toISOString().replace('T', ' ').substring(0, 19);
-
+      const dateStr = `"${new Date(tx.timestamp).toLocaleString().replace(/"/g, '""')}"`;
       reportData.push([
-        tx.id,
-        `"${dateStr}"`,
+        dateStr,
         `"${tx.item.replace(/"/g, '""')}"`,
         tx.type,
         tx.category,
-        qty,
-        up > 0 ? up : (tx.amount / qty),
-        displayAmount,
-        tx.currency,
-        `"${tx.source}"`,
-        '"VERIFIED_LOCAL"'
+        tx.quantity || 1,
+        tx.unitPrice || (tx.amount / (tx.quantity || 1)),
+        tx.amount,
+        `"${tx.source}"`
       ]);
     });
 
@@ -157,15 +145,12 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, inventoryLevels, se
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    const timestampStr = new Date().toISOString().split('T')[0];
-    
     link.setAttribute('href', url);
-    link.setAttribute('download', `Bank_Audit_${settings.shopName.replace(/\s+/g, '_')}_${timestampStr}.csv`);
+    link.setAttribute('download', `Audit_Report_${settings.shopName.replace(/\s+/g, '_')}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    URL.revokeObjectURL(url);
   };
 
   return (
@@ -214,7 +199,6 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, inventoryLevels, se
         </div>
       )}
 
-      {/* Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard label="Total Sales" description="Revenue collected" value={totalRevenue} color="emerald" icon={<TrendingUp size={20} />} />
         <MetricCard label="Gross Profit" description="Profit after stock costs" value={grossProfit} color="indigo" icon={<Coins size={20} />} />
@@ -325,18 +309,20 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, inventoryLevels, se
                         </div>
                         <div className="bg-slate-50 p-3 rounded-xl space-y-2 border border-transparent group-hover:border-indigo-100 transition-colors">
                           <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2 text-[11px] text-slate-700 font-bold">
-                               <Truck size={14} className="text-indigo-500" />
-                               <span>Order <strong>{restockQty}</strong> from <strong>{suggestion.market}</strong></span>
+                            <div className="flex items-center justify-between w-full">
+                               <div className="flex items-center gap-2 text-[11px] text-slate-700 font-bold">
+                                 <Truck size={14} className="text-indigo-500" />
+                                 <span>Order <strong>{restockQty}</strong> from <strong>{suggestion.market}</strong></span>
+                               </div>
+                               <button 
+                                onClick={() => handleLogRestock(item, restockQty)}
+                                disabled={isLogged}
+                                className={`p-1.5 rounded-lg transition-all ${isLogged ? 'bg-emerald-100 text-emerald-600' : 'bg-white shadow-sm border border-slate-200 text-indigo-600 hover:bg-indigo-600 hover:text-white'}`}
+                                title="Log as Expense"
+                              >
+                                {isLogged ? <CheckCircle size={14} /> : <FilePlus size={14} />}
+                              </button>
                             </div>
-                            <button 
-                              onClick={() => handleLogRestock(item, restockQty)}
-                              disabled={isLogged}
-                              className={`p-1.5 rounded-lg transition-all ${isLogged ? 'bg-emerald-100 text-emerald-600' : 'bg-white shadow-sm border border-slate-200 text-indigo-600 hover:bg-indigo-600 hover:text-white'}`}
-                              title="Log as Expense"
-                            >
-                              {isLogged ? <CheckCircle size={14} /> : <FilePlus size={14} />}
-                            </button>
                           </div>
                           <div className="flex items-start gap-2 text-[10px] text-slate-500 italic bg-white/50 p-2 rounded-lg">
                             <Store size={12} className="shrink-0 mt-0.5 text-amber-500" />

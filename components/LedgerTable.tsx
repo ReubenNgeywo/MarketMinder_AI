@@ -4,7 +4,7 @@ import {
   Trash2, Search, Filter, Download, Receipt, Smartphone, 
   Mic, Zap, Package, Edit2, Check, X, Calculator, 
   Info, TrendingUp, ArrowUpRight, ArrowDownRight,
-  ClipboardList, ShoppingBag, Layers, AlertTriangle
+  ClipboardList, ShoppingBag, Layers, AlertTriangle, FileText
 } from 'lucide-react';
 import { Transaction, TransactionType, Category } from '../types';
 
@@ -32,13 +32,49 @@ const LedgerTable: React.FC<LedgerTableProps> = ({ transactions, onDelete, onUpd
     return map;
   }, [transactions]);
 
-  const filtered = transactions.filter(t => {
-    const matchesSearch = t.item.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          t.originalMessage.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          t.baseItem.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesType = filterType === 'ALL' || t.type === filterType;
-    return matchesSearch && matchesType;
-  });
+  const filtered = useMemo(() => {
+    return transactions.filter(t => {
+      const matchesSearch = t.item.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                            t.originalMessage.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                            t.baseItem.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesType = filterType === 'ALL' || t.type === filterType;
+      return matchesSearch && matchesType;
+    });
+  }, [transactions, searchTerm, filterType]);
+
+  const handleExportCSV = () => {
+    if (filtered.length === 0) {
+      alert("No records found to export.");
+      return;
+    }
+
+    // Headers count: 8
+    const headers = ["Date", "Flow", "Item", "Quantity", "Unit Price", "Total Amount", "Source", "Notes"];
+    
+    const rows = filtered.map(tx => {
+      const dateStr = `"${new Date(tx.timestamp).toLocaleString().replace(/"/g, '""')}"`;
+      const flowStr = tx.type === TransactionType.INCOME ? "SALE" : "STOCK";
+      const itemStr = `"${tx.item.replace(/"/g, '""')}"`;
+      const qty = tx.quantity || 1;
+      const unitPrice = tx.unitPrice || 0;
+      const totalAmount = tx.amount;
+      const sourceStr = `"${tx.source.replace(/"/g, '""')}"`;
+      const notesStr = `"${tx.originalMessage.replace(/"/g, '""')}"`;
+
+      return [dateStr, flowStr, itemStr, qty, unitPrice, totalAmount, sourceStr, notesStr];
+    });
+
+    const csvContent = [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `Soko_Ledger_Export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   const getSourceIcon = (source: string) => {
     switch (source) {
@@ -111,6 +147,14 @@ const LedgerTable: React.FC<LedgerTableProps> = ({ transactions, onDelete, onUpd
               <option value={TransactionType.INCOME}>Sales (+)</option>
               <option value={TransactionType.EXPENSE}>Costs (-)</option>
             </select>
+            
+            <button 
+              onClick={handleExportCSV}
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-2xl transition-all text-xs font-black uppercase shadow-lg shadow-indigo-100 active:scale-95"
+            >
+              <Download size={16} />
+              CSV
+            </button>
           </div>
         </div>
       </div>
@@ -132,7 +176,6 @@ const LedgerTable: React.FC<LedgerTableProps> = ({ transactions, onDelete, onUpd
               const isEditing = editingId === tx.id;
               const isIncome = tx.type === TransactionType.INCOME;
               
-              // Use current edit state or transaction state
               const currentUnitPrice = isEditing ? (editForm.unitPrice || 0) : (tx.unitPrice || 0);
               const currentQty = isEditing ? (editForm.quantity || 1) : (tx.quantity || 1);
               const currentItemName = isEditing ? (editForm.item || '') : tx.item;
@@ -241,7 +284,7 @@ const LedgerTable: React.FC<LedgerTableProps> = ({ transactions, onDelete, onUpd
                      <div className="flex items-center justify-center gap-2">
                        {isEditing ? (
                          <>
-                           <button onClick={handleSaveEdit} className="p-2 bg-emerald-500 text-white rounded-xl shadow-lg shadow-emerald-100 hover:bg-emerald-600 transition-all active:scale-90">
+                           <button onClick={handleSaveEdit} className="p-2 bg-emerald-500 text-white rounded-xl shadow-lg shadow-emerald-100 hover:bg-emerald-600 transition-all active:scale-95">
                              <Check size={16} />
                            </button>
                            <button onClick={() => setEditingId(null)} className="p-2 bg-slate-100 text-slate-400 rounded-xl hover:bg-slate-200 transition-all">
