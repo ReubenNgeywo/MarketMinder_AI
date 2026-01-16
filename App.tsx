@@ -16,13 +16,15 @@ import {
   Lock,
   WifiOff,
   Wifi,
-  CloudOff
+  CloudOff,
+  Keyboard
 } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import ChatInterface from './components/ChatInterface';
 import LedgerTable from './components/LedgerTable';
 import AnalyticsPanel from './components/AnalyticsPanel';
 import SettingsPage from './components/SettingsPage';
+import TransactionModal from './components/TransactionModal';
 import { Transaction, TransactionType, Category, UserSettings } from './types';
 
 const App: React.FC = () => {
@@ -47,6 +49,7 @@ const App: React.FC = () => {
   const [pinInput, setPinInput] = useState("");
   const [isSidebarOpen, setSidebarOpen] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isManualModalOpen, setManualModalOpen] = useState(false);
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -239,11 +242,18 @@ const App: React.FC = () => {
               </div>
             </div>
             
-            <div className="flex items-center gap-4">
-              <Link to="/chat" className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-full transition-all text-sm font-medium">
-                <PlusCircle size={18} />
-                <span className="hidden sm:inline">Log Transaction</span>
+            <div className="flex items-center gap-2">
+              <Link to="/chat" className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-full transition-all text-sm font-medium">
+                <MessageSquare size={16} />
+                <span className="hidden lg:inline">Ask AI</span>
               </Link>
+              <button 
+                onClick={() => setManualModalOpen(true)}
+                className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-full transition-all text-sm font-medium shadow-md shadow-emerald-200"
+              >
+                <Keyboard size={18} />
+                <span className="hidden sm:inline">Quick Entry</span>
+              </button>
             </div>
           </header>
 
@@ -266,6 +276,12 @@ const App: React.FC = () => {
           </div>
         </main>
       </div>
+
+      <TransactionModal 
+        isOpen={isManualModalOpen} 
+        onClose={() => setManualModalOpen(false)} 
+        onSave={addTransaction} 
+      />
     </HashRouter>
   );
 };

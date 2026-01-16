@@ -5,12 +5,23 @@ import { Transaction, TransactionType, Category, ParsingResult } from "../types"
 export const parseTransactionMessage = async (message: string, history: Transaction[] = []): Promise<ParsingResult> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
-  // Extract unique inventory item names for better context
-  const existingItems = Array.from(new Set(
-    history
-      .filter(t => t.type === TransactionType.EXPENSE && t.category === Category.INVENTORY)
-      .map(t => t.item.toUpperCase())
-  ));
+  // Calculate current inventory levels from history
+  const inventoryLevels: Record<string, number> = {};
+  [...history].reverse().forEach(tx => {
+    const itemKey = tx.item.toUpperCase().trim();
+    const qty = tx.quantity || 1;
+    if (!inventoryLevels[itemKey]) inventoryLevels[itemKey] = 0;
+    
+    if (tx.type === TransactionType.EXPENSE && tx.category === Category.INVENTORY) {
+      inventoryLevels[itemKey] += qty;
+    } else if (tx.type === TransactionType.INCOME) {
+      inventoryLevels[itemKey] -= qty;
+    }
+  });
+
+  const stockContext = Object.entries(inventoryLevels)
+    .map(([item, qty]) => `${item}: ${qty} in stock`)
+    .join(', ');
 
   const pricingContext = history
     .filter(t => t.type === TransactionType.EXPENSE && t.category === Category.INVENTORY)
@@ -22,16 +33,19 @@ export const parseTransactionMessage = async (message: string, history: Transact
     model: 'gemini-3-flash-preview',
     contents: `Parse this Nairobi trader message: "${message}". 
     
+    Current Inventory Status:
+    ${stockContext || 'No stock recorded yet.'}
+
     Context:
-    - Existing Stock Items (Canonical Names): ${existingItems.join(', ') || 'None.'}
     - Recent pricing details: ${pricingContext || 'First time setup.'}
 
     Instructions:
     1. Identify Item, Type (Income/Expense), Amount, Qty.
-    2. CRITICAL: If the user refers to an item (e.g., "rice") and one of the Canonical Names contains that word (e.g., "BAGS OF 10KG RICE"), you MUST use the exact Canonical Name for the 'item' property.
-    3. If user says "I have [X] of [Item]", treat it as Opening Stock (Expense/Inventory).
-    4. Provide a savvy 'insight' in Sheng/Swahili.
-    5. Set status to 'incomplete' if critical data like Item is missing.`,
+    2. Income transactions (sales) decrease stock. Expense (Inventory) transactions increase stock.
+    3. CRITICAL: Calculate the "resultingStock" for the item being discussed.
+    4. If the resulting stock falls below 5 units, set "isLowStockAlert" to true.
+    5. If it's a sale (Income) and resulting stock would be negative, set status to 'incomplete' and ask the user to verify if they really have that much stock.
+    6. Provide a savvy 'insight' in Sheng/Swahili. If stock is low, warn them in Sheng (e.g., "Mzee, stock ya [Item] inaisha!").`,
     config: {
       responseMimeType: "application/json",
       responseSchema: {
@@ -52,18 +66,26 @@ export const parseTransactionMessage = async (message: string, history: Transact
             type: Type.STRING, 
             enum: ['Income', 'Expense'] 
           },
+          resultingStock: { type: Type.NUMBER },
+          isLowStockAlert: { type: Type.BOOLEAN },
           suggestedUnitPrice: { type: Type.NUMBER },
           insight: { type: Type.STRING }
         },
         required: ["status"]
       },
-      systemInstruction: "You are a savvy Nairobi Market ERP parser. Help the user onboard by recognizing starting stock levels and matching names exactly to previous records."
+      systemInstruction: "You are a savvy Nairobi Market ERP parser. You are an expert at tracking inventory levels and warning traders when their stock is running low. Use market jargon like 'Daily turnover' and 'Restock'."
     }
   });
 
   try {
     const data = JSON.parse(response.text || '{}');
     if (data.status === 'complete' || (data.status === 'incomplete' && data.item && data.suggestedUnitPrice)) {
+      // Append low stock alert to insight if flagged
+      let finalInsight = data.insight || "";
+      if (data.isLowStockAlert) {
+        finalInsight = `⚠️ LOW STOCK ALERT: ${finalInsight}`;
+      }
+
       return {
         status: data.status,
         transaction: {
@@ -76,7 +98,7 @@ export const parseTransactionMessage = async (message: string, history: Transact
           type: data.type as TransactionType,
         },
         suggestedUnitPrice: data.suggestedUnitPrice,
-        insight: data.insight,
+        insight: finalInsight,
         followUpQuestion: data.followUpQuestion
       };
     }
