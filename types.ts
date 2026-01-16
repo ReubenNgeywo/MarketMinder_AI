@@ -19,11 +19,13 @@ export interface Transaction {
   timestamp: number;
   amount: number;
   currency: string;
-  item: string;
+  item: string; // Display name (e.g., "25kg Sugar")
+  baseItem: string; // Canonical name (e.g., "Sugar") for inventory matching
   category: Category;
   type: TransactionType;
   quantity?: number;
   unitPrice?: number;
+  unit?: string; // e.g., "kg", "bag", "tray"
   originalMessage: string;
   source: 'SMS' | 'Voice' | 'M-Pesa' | 'Manual' | 'Receipt Scan';
   tags?: string[];
@@ -44,6 +46,7 @@ export interface ParsingResult {
   transactions?: Partial<Transaction>[];
   followUpQuestion?: string;
   suggestedUnitPrice?: number;
+  purchasePrice?: number; // Added to track cost basis for inventory items
   insight?: string;
 }
 

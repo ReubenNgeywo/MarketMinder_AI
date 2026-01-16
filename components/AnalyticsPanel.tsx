@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   AreaChart, 
   Area, 
@@ -125,7 +125,7 @@ const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({ transactions }) => {
               </span>
             </div>
           </div>
-          <ResponsiveContainer width="100%" height="80%">
+          <ResponsiveContainer width="100%" height="80%" minWidth={0}>
             <AreaChart data={chartData}>
               <defs>
                 <linearGradient id="colorBalance" x1="0" y1="0" x2="0" y2="1">
@@ -172,7 +172,7 @@ const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({ transactions }) => {
               <PieIcon size={18} className="text-indigo-600" />
               <h4 className="font-black text-xs uppercase tracking-widest text-slate-800">Profitability Breakdown</h4>
            </div>
-           <ResponsiveContainer width="100%" height="70%">
+           <ResponsiveContainer width="100%" height="70%" minWidth={0}>
              <RPieChart>
                <Pie
                  data={pieData}

@@ -68,9 +68,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
   };
 
   const toggleVoice = () => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitRecognition;
-    if (!SpeechRecognition && !(window as any).webkitSpeechRecognition) { alert("Voice recognition not supported."); return; }
     const Recognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!Recognition) { alert("Voice recognition not supported."); return; }
     if (isListening) { setIsListening(false); return; }
     const recognition = new Recognition();
     recognition.lang = 'en-US, sw-KE';
@@ -126,60 +125,58 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
       let aiContent = "";
       let status: Message['status'] = 'completed';
 
+      // Unified handling for multiple transactions (text or image)
       if (result.status === 'complete' && result.transactions && result.transactions.length > 0) {
-        let successCount = 0;
+        let salesCount = 0;
+        let purchasesCount = 0;
+        let totalVal = 0;
         let errors: string[] = [];
+        
         result.transactions.forEach((parsed, index) => {
+          const type = parsed.type as TransactionType;
           const newTx: Transaction = {
             id: `tx-${Date.now()}-${index}`,
             timestamp: Date.now(),
             amount: parsed.amount || ( (parsed.quantity || 1) * (parsed.unitPrice || 0)),
             unitPrice: parsed.unitPrice,
             quantity: parsed.quantity,
+            unit: parsed.unit || 'pcs',
             currency: parsed.currency || 'KES',
             item: parsed.item!,
-            category: parsed.category as Category || (parsed.type === TransactionType.EXPENSE ? Category.INVENTORY : Category.SALES),
-            type: parsed.type as TransactionType || TransactionType.EXPENSE,
-            originalMessage: text || "Batch Scan",
-            source: 'Receipt Scan',
+            baseItem: parsed.baseItem || parsed.item!.toUpperCase(),
+            category: parsed.category as Category,
+            type: type,
+            originalMessage: text || "Batch Input",
+            source: imageBase64 ? 'Receipt Scan' : 'Manual',
           };
+          
           const addResult = onAddTransaction(newTx);
-          if (addResult.success) successCount++;
-          else errors.push(addResult.error || `Error adding ${newTx.item}.`);
+          if (addResult.success) {
+            if (type === TransactionType.INCOME) {
+              salesCount++;
+              totalVal += newTx.amount;
+            } else {
+              purchasesCount++;
+            }
+          } else {
+            errors.push(`${newTx.item}: ${addResult.error}`);
+          }
         });
-        aiContent = `Success! ✅ Added **${successCount}** items.`;
-        if (errors.length > 0) aiContent += `\n\n⚠️ Issues:\n- ${errors.join('\n- ')}`;
-        if (result.insight) aiContent += `\n\n💡 **AI Summary:** ${result.insight}`;
+        
+        const summaryParts = [];
+        if (salesCount > 0) summaryParts.push(`✅ Added **${salesCount} sales** (Total: KES ${totalVal.toLocaleString()})`);
+        if (purchasesCount > 0) summaryParts.push(`📦 Added **${purchasesCount} stock restocks**`);
+        
+        aiContent = summaryParts.length > 0 ? summaryParts.join('\n') : "Sijafanikiwa kuongeza chochote.";
+        if (errors.length > 0) aiContent += `\n\n⚠️ **Errors:**\n- ${errors.join('\n- ')}`;
+        if (result.insight) aiContent += `\n\n💡 **Tip:** ${result.insight}`;
       } 
-      else if (result.status === 'complete' && result.transaction) {
-        const parsed = result.transaction;
-        const newTx: Transaction = {
-          id: `tx-${Date.now()}`,
-          timestamp: Date.now(),
-          amount: parsed.amount || ((parsed.quantity || 1) * (parsed.unitPrice || result.suggestedUnitPrice || 0)),
-          unitPrice: parsed.unitPrice || result.suggestedUnitPrice,
-          quantity: parsed.quantity,
-          currency: parsed.currency || 'KES',
-          item: parsed.item!,
-          category: parsed.category || Category.INVENTORY,
-          type: parsed.type || TransactionType.EXPENSE,
-          originalMessage: text || "Manual Entry",
-          source: imageBase64 ? 'Receipt Scan' : (isListening ? 'Voice' : 'Manual'),
-        };
-        const addResult = onAddTransaction(newTx);
-        if (addResult.success) {
-          aiContent = `Sawa! Recorded **${newTx.item}** with **${newTx.quantity || 1} units**.`;
-          if (result.insight) aiContent += `\n\n💡 **Insight:** ${result.insight}`;
-        } else {
-          status = 'error';
-          aiContent = `**Error:** ${addResult.error}\n\n${addResult.suggestion || ''}`;
-        }
-      } else if (result.status === 'incomplete') {
+      else if (result.status === 'incomplete') {
         status = 'clarification';
         aiContent = result.followUpQuestion || "Nipe details zaidi.";
       } else {
         status = 'error';
-        aiContent = "Sijaelewa hiyo. Jaribu tena.";
+        aiContent = "Sijaelewa hiyo vizuri. Jaribu tena ukitaja item, quantity na bei.";
       }
 
       const audioBase64 = await generateSpeech(aiContent.replace(/\*\*/g, ''));
@@ -194,7 +191,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
       setMessages(prev => [...prev, aiResponse]);
       if (audioBase64) playAudio(audioBase64);
     } catch (error) {
-      setMessages(prev => [...prev, { id: `ai-${Date.now()}`, role: 'assistant', content: "API Error. Check Settings.", timestamp: Date.now() }]);
+      setMessages(prev => [...prev, { id: `ai-${Date.now()}`, role: 'assistant', content: "Pole! Kuna API Error. Check your connection.", timestamp: Date.now() }]);
     } finally {
       setIsLoading(false);
       setIsListening(false);

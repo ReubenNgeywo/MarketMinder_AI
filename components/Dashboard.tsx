@@ -73,10 +73,12 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, inventoryLevels, se
 
   const handleLogRestock = (item: string, qty: number) => {
     const unitPrice = getLastUnitPrice(item);
+    // Fix: Add required 'baseItem' property to ensure compliance with Transaction type.
     const newTx: Transaction = {
       id: `restock-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       timestamp: Date.now(),
       item: item.toUpperCase(),
+      baseItem: item.toUpperCase(),
       type: TransactionType.EXPENSE,
       category: Category.INVENTORY,
       quantity: qty,

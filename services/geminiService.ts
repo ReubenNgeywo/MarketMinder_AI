@@ -2,50 +2,52 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { Transaction, TransactionType, Category, ParsingResult } from "../types";
 
+// Standard Nairobi Trade Conversion Factors
+const UNIT_CONVERSIONS = `
+Conversion Rules (Normalize to Base Units):
+- EGGS: 1 Tray = 30 Pieces. (Base: PIECE)
+- SUGAR/RICE/MAIZE: 1 Bag = 50 KG or 25 KG as specified. (Base: KG)
+- MILK: 1 Crate = 12 Packets. (Base: PACKET)
+- BREAD: 1 Bale = 20 Loaves. (Base: LOAF)
+- SODA: 1 Case = 24 Bottles. (Base: BOTTLE)
+`;
+
 export const parseTransactionMessage = async (message: string, history: Transaction[] = []): Promise<ParsingResult> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
-  // Calculate current inventory levels from history
-  const inventoryLevels: Record<string, number> = {};
-  [...history].reverse().forEach(tx => {
-    const itemKey = tx.item.toUpperCase().trim();
-    const qty = tx.quantity || 1;
-    if (!inventoryLevels[itemKey]) inventoryLevels[itemKey] = 0;
+  const inventorySummary: Record<string, { qty: number, lastCost: number }> = {};
+  history.forEach(tx => {
+    const key = tx.baseItem.toUpperCase().trim();
+    if (!inventorySummary[key]) inventorySummary[key] = { qty: 0, lastCost: 0 };
     
     if (tx.type === TransactionType.EXPENSE && tx.category === Category.INVENTORY) {
-      inventoryLevels[itemKey] += qty;
+      const qty = tx.quantity || 1;
+      inventorySummary[key].qty += qty;
+      if (tx.unitPrice) inventorySummary[key].lastCost = tx.unitPrice;
     } else if (tx.type === TransactionType.INCOME) {
-      inventoryLevels[itemKey] -= qty;
+      const qty = tx.quantity || 1;
+      inventorySummary[key].qty -= qty;
     }
   });
 
-  const stockContext = Object.entries(inventoryLevels)
-    .map(([item, qty]) => `${item}: ${qty} in stock`)
-    .join(', ');
-
-  const pricingContext = history
-    .filter(t => t.type === TransactionType.EXPENSE && t.category === Category.INVENTORY)
-    .slice(0, 10)
-    .map(t => `${t.item}: Bought at ${t.unitPrice || t.amount} ${t.currency} on ${new Date(t.timestamp).toLocaleDateString()}`)
+  const stockContext = Object.entries(inventorySummary)
+    .map(([item, data]) => `${item}: ${data.qty} base units in stock (Last Cost per base unit: KES ${data.lastCost})`)
     .join('\n');
 
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: `Parse this Nairobi trader message: "${message}". 
+    contents: `Parse this potentially multi-item message: "${message}". 
     
-    Current Inventory Status:
-    ${stockContext || 'No stock recorded yet.'}
+    Current Inventory (in Base Units):
+    ${stockContext || 'No items in stock.'}
 
-    Context:
-    - Recent pricing details: ${pricingContext || 'First time setup.'}
+    ${UNIT_CONVERSIONS}
 
     Instructions:
-    1. Identify Item, Type (Income/Expense), Amount, Qty.
-    2. Income transactions (sales) decrease stock. Expense (Inventory) transactions increase stock.
-    3. CRITICAL: Calculate the "resultingStock" for the item being discussed.
-    4. If the resulting stock falls below 5 units, set "isLowStockAlert" to true.
-    5. If it's a sale (Income) and resulting stock would be negative, set status to 'incomplete' and ask the user to verify if they really have that much stock.
-    6. Provide a savvy 'insight' in Sheng/Swahili. If stock is low, warn them in Sheng (e.g., "Mzee, stock ya [Item] inaisha!").`,
+    1. Extract ALL line items mentioned in the message. 
+    2. NORMALIZATION: Convert everything to smallest base units (KG, PIECE, etc).
+    3. LOSS PREVENTION: Compare the base unit sale price for EACH item against its 'Last Cost'.
+    4. If multiple items are present, return them in the 'transactions' array.`,
     config: {
       responseMimeType: "application/json",
       responseSchema: {
@@ -53,139 +55,125 @@ export const parseTransactionMessage = async (message: string, history: Transact
         properties: {
           status: { type: Type.STRING, enum: ['complete', 'incomplete', 'error'] },
           followUpQuestion: { type: Type.STRING },
-          totalAmount: { type: Type.NUMBER },
-          unitPrice: { type: Type.NUMBER },
-          quantity: { type: Type.NUMBER },
-          currency: { type: Type.STRING },
-          item: { type: Type.STRING },
-          category: { 
-            type: Type.STRING, 
-            enum: ['Inventory', 'Rent', 'Transport', 'Food', 'Sales', 'Other', 'Credit'] 
+          transactions: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                totalAmount: { type: Type.NUMBER },
+                unitPrice: { type: Type.NUMBER },
+                purchasePrice: { type: Type.NUMBER },
+                quantity: { type: Type.NUMBER },
+                item: { type: Type.STRING },
+                baseItem: { type: Type.STRING },
+                unit: { type: Type.STRING },
+                type: { type: Type.STRING, enum: ['Income', 'Expense'] },
+                isLossAlert: { type: Type.BOOLEAN },
+                insight: { type: Type.STRING }
+              }
+            }
           },
-          type: { 
-            type: Type.STRING, 
-            enum: ['Income', 'Expense'] 
-          },
-          resultingStock: { type: Type.NUMBER },
-          isLowStockAlert: { type: Type.BOOLEAN },
-          suggestedUnitPrice: { type: Type.NUMBER },
           insight: { type: Type.STRING }
         },
         required: ["status"]
       },
-      systemInstruction: "You are a savvy Nairobi Market ERP parser. You are an expert at tracking inventory levels and warning traders when their stock is running low. Use market jargon like 'Daily turnover' and 'Restock'."
+      systemInstruction: "You are a Nairobi ERP Expert. You handle multi-item messages from traders. Break them down into clean transaction objects."
     }
   });
 
   try {
     const data = JSON.parse(response.text || '{}');
-    if (data.status === 'complete' || (data.status === 'incomplete' && data.item && data.suggestedUnitPrice)) {
-      // Append low stock alert to insight if flagged
-      let finalInsight = data.insight || "";
-      if (data.isLowStockAlert) {
-        finalInsight = `⚠️ LOW STOCK ALERT: ${finalInsight}`;
-      }
-
+    if (data.status === 'complete' && data.transactions) {
+      // Return normalized transaction objects
       return {
         status: data.status,
-        transaction: {
-          amount: data.totalAmount,
-          unitPrice: data.unitPrice,
-          quantity: data.quantity,
-          currency: data.currency || 'KES',
-          item: data.item,
-          category: data.category as Category || Category.OTHER,
-          type: data.type as TransactionType,
-        },
-        suggestedUnitPrice: data.suggestedUnitPrice,
-        insight: finalInsight,
-        followUpQuestion: data.followUpQuestion
+        transactions: data.transactions.map((t: any) => ({
+          amount: t.totalAmount || (t.quantity * t.unitPrice),
+          unitPrice: t.unitPrice,
+          quantity: t.quantity,
+          currency: 'KES',
+          item: t.item,
+          baseItem: t.baseItem || t.item.toUpperCase(),
+          unit: t.unit || 'pcs',
+          category: t.type === 'Income' ? Category.SALES : Category.INVENTORY,
+          type: t.type as TransactionType,
+          insight: t.insight,
+          isLossAlert: t.isLossAlert
+        })),
+        insight: data.insight
       };
     }
-    return {
-      status: data.status,
-      followUpQuestion: data.followUpQuestion
-    };
+    return { status: data.status, followUpQuestion: data.followUpQuestion };
   } catch (e) {
-    console.error("Failed to parse AI response", e);
     return { status: 'error' };
   }
 };
 
 export const parseReceiptImage = async (base64Image: string): Promise<ParsingResult> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
-  const imagePart = {
-    inlineData: {
-      mimeType: 'image/jpeg',
-      data: base64Image.split(',')[1] || base64Image,
-    },
-  };
-
-  const textPart = {
-    text: `Scan this document carefully. It may be a list of "Starting Inventory" or an invoice.
-    1. Look for keywords like "Bought", "I have", "Stock", or "Sold".
-    2. For EACH item, extract: Item Name, Quantity, Unit Price, Total, and Currency.
-    3. IMPORTANT: If currency is not explicitly found (e.g. KES, $, UGX), default to "KES".
-    4. If the user is just listing what they currently have (Onboarding), treat each as an 'Expense' of type 'Inventory' at a cost price.
-    5. Categorize purchases/stock as 'Inventory'.
-    6. Return an array of transactions with the 'currency' field correctly populated for every item.
-    7. Include a brief 'insight' in Swahili/Sheng welcoming the user if it looks like shop setup.`
-  };
-
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: { parts: [imagePart, textPart] },
+    contents: {
+      parts: [
+        { inlineData: { mimeType: 'image/jpeg', data: base64Image.split(',')[1] || base64Image } },
+        { text: `Extract transactions. ${UNIT_CONVERSIONS} Always normalize to base units (KG, PIECE, PACKET).` }
+      ]
+    },
     config: {
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
         properties: {
-          status: { type: Type.STRING, enum: ['complete', 'incomplete', 'error'] },
-          insight: { type: Type.STRING },
+          status: { type: Type.STRING },
           transactions: {
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
               properties: {
                 item: { type: Type.STRING },
+                baseItem: { type: Type.STRING },
                 type: { type: Type.STRING, enum: ['Income', 'Expense'] },
-                totalAmount: { type: Type.NUMBER },
                 unitPrice: { type: Type.NUMBER },
                 quantity: { type: Type.NUMBER },
-                currency: { type: Type.STRING },
-                category: { type: Type.STRING }
+                unit: { type: Type.STRING }
               },
-              required: ["item", "type", "totalAmount", "currency"]
+              required: ["item", "type", "quantity", "unitPrice"]
             }
           }
-        },
-        required: ["status", "transactions"]
+        }
       }
     }
   });
 
   try {
     const data = JSON.parse(response.text || '{}');
-    const mappedTransactions = (data.transactions || []).map((t: any) => ({
-      amount: t.totalAmount,
-      unitPrice: t.unitPrice,
-      quantity: t.quantity,
-      currency: t.currency || 'KES',
-      item: t.item,
-      category: t.category as Category || (t.type === 'Expense' ? Category.INVENTORY : Category.SALES),
-      type: t.type as TransactionType,
-    }));
-
     return {
-      status: data.status,
-      transactions: mappedTransactions,
-      insight: data.insight
+      status: 'complete',
+      transactions: data.transactions.map((t: any) => ({
+        ...t,
+        amount: t.unitPrice * t.quantity,
+        currency: 'KES',
+        category: t.type === 'Income' ? Category.SALES : Category.INVENTORY,
+        type: t.type as TransactionType
+      }))
     };
   } catch (e) {
-    console.error("Receipt parsing error", e);
     return { status: 'error' };
   }
+};
+
+export const generateInsights = async (transactions: Transaction[]): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const summary = transactions.slice(0, 30).map(t => `${t.type}: ${t.amount} for ${t.item} (${t.quantity} ${t.unit})`).join('\n');
+  const response = await ai.models.generateContent({
+    model: 'gemini-3-pro-preview',
+    contents: `Analyze profit margins on retail sales vs wholesale buys. Are they selling eggs/milk at enough markup?\n\nHistory:\n${summary}`,
+    config: {
+      thinkingConfig: { thinkingBudget: 15000 },
+      systemInstruction: "You are the Market King. Focus on item-level profitability."
+    }
+  });
+  return response.text || "Keep trading to unlock insights.";
 };
 
 export const generateSpeech = async (text: string): Promise<string | null> => {
@@ -193,40 +181,12 @@ export const generateSpeech = async (text: string): Promise<string | null> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text: `Say clearly and naturally: ${text}` }] }],
+      contents: [{ parts: [{ text }] }],
       config: {
         responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Kore' },
-          },
-        },
-      },
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } }
+      }
     });
-
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    return base64Audio || null;
-  } catch (error) {
-    console.error("TTS generation failed", error);
-    return null;
-  }
-};
-
-export const generateInsights = async (transactions: Transaction[]): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  const summary = transactions.slice(0, 20).map(t => {
-    const detail = t.quantity && t.unitPrice ? `(${t.quantity} x ${t.unitPrice})` : '';
-    return `${t.type}: ${t.amount} ${t.currency} for ${t.item} ${detail}`;
-  }).join('\n');
-  
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-pro-preview',
-    contents: `Analyze these transactions and give me 3 specific business growth tips for a Nairobi trader. Include one forecast and one tip in Sheng/Swahili. Focus on gross margin and turnover. \n\n${summary}`,
-    config: {
-      thinkingConfig: { thinkingBudget: 8000 },
-      systemInstruction: "You are the top business consultant in Nairobi. Use market jargon like 'Daily turnover', 'Markup', and 'Restock cycle'."
-    }
-  });
-
-  return response.text || "Keep trading to get insights.";
+    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+  } catch { return null; }
 };
