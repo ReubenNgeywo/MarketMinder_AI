@@ -17,24 +17,34 @@ export enum Category {
 export interface Transaction {
   id: string;
   timestamp: number;
-  amount: number; // Total amount
+  amount: number;
   currency: string;
   item: string;
   category: Category;
   type: TransactionType;
   quantity?: number;
-  unitPrice?: number; // Price per item
+  unitPrice?: number;
   originalMessage: string;
-  source: 'SMS' | 'Voice' | 'M-Pesa' | 'Manual';
+  source: 'SMS' | 'Voice' | 'M-Pesa' | 'Manual' | 'Receipt Scan';
   tags?: string[];
 }
 
-export interface BusinessSummary {
-  totalIncome: number;
-  totalExpenses: number;
-  netBalance: number;
-  inventoryValue: number;
-  topItem: string;
+export interface UserSettings {
+  shopName: string;
+  location: string;
+  preferredLanguage: 'English' | 'Swahili' | 'Sheng';
+  aiDataConsent: boolean;
+  pinEnabled: boolean;
+  pinCode?: string;
+}
+
+export interface ParsingResult {
+  status: 'complete' | 'incomplete' | 'error';
+  transaction?: Partial<Transaction>;
+  transactions?: Partial<Transaction>[];
+  followUpQuestion?: string;
+  suggestedUnitPrice?: number;
+  insight?: string;
 }
 
 export interface Message {
@@ -42,6 +52,8 @@ export interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
-  status?: 'pending' | 'completed' | 'error';
+  status?: 'pending' | 'completed' | 'error' | 'clarification';
   transactionId?: string;
+  audioData?: string;
+  imageContent?: string;
 }

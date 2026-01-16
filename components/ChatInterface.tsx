@@ -1,20 +1,34 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Loader2, Mic, Receipt, CheckCircle2, AlertCircle, MicOff, AlertTriangle, PackageSearch } from 'lucide-react';
-import { Message, Transaction, TransactionType, Category } from '../types';
-import { parseTransactionMessage } from '../services/geminiService';
+import { Send, Bot, User, Loader2, Mic, Receipt, CheckCircle2, AlertCircle, MicOff, AlertTriangle, Volume2, PlayCircle, Lightbulb, Camera, Image as ImageIcon, X, Sparkles, ShieldCheck } from 'lucide-react';
+import { Message, Transaction, TransactionType, Category, ParsingResult } from '../types';
+import { parseTransactionMessage, parseReceiptImage, generateSpeech } from '../services/geminiService';
 
 interface ChatInterfaceProps {
-  onAddTransaction: (tx: Transaction) => { success: boolean, error?: string };
+  onAddTransaction: (tx: Transaction) => { success: boolean, error?: string, suggestion?: string };
   inventoryLevels: Record<string, number>;
+  transactions: Transaction[];
 }
 
-const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, inventoryLevels }) => {
+const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, inventoryLevels, transactions }) => {
+  const isFirstTime = transactions.length === 0;
+  
+  const [showConsentModal, setShowConsentModal] = useState(() => {
+    return localStorage.getItem('erp_privacy_consented') !== 'true';
+  });
+
+  const handleConsent = () => {
+    localStorage.setItem('erp_privacy_consented', 'true');
+    setShowConsentModal(false);
+  };
+
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
       role: 'assistant',
-      content: 'Sasa! Use voice or text to log sales. E.g. "Sold 5 trays of eggs for 300 each." Kumbuka: Huwezi kuuza kile hauna kwa stock!',
+      content: isFirstTime 
+        ? 'Karibu! Nisaidie ku-setup duka lako. Unaweza kusema "Niko na trays 20 za mayai" au upige picha ya list yako ya stock.'
+        : 'Sasa! Use voice, text, or snap a photo of a receipt to log transactions.',
       timestamp: Date.now()
     }
   ]);
@@ -22,6 +36,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -29,19 +45,34 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
     }
   }, [messages, isLoading]);
 
+  const playAudio = async (base64Audio: string) => {
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      }
+      const ctx = audioContextRef.current;
+      const binaryString = atob(base64Audio);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) { bytes[i] = binaryString.charCodeAt(i); }
+      const dataInt16 = new Int16Array(bytes.buffer);
+      const frameCount = dataInt16.length;
+      const buffer = ctx.createBuffer(1, frameCount, 24000);
+      const channelData = buffer.getChannelData(0);
+      for (let i = 0; i < frameCount; i++) { channelData[i] = dataInt16[i] / 32768.0; }
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start();
+    } catch (e) { console.error("Audio playback error", e); }
+  };
+
   const toggleVoice = () => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("Voice recognition not supported in this browser.");
-      return;
-    }
-
-    if (isListening) {
-      setIsListening(false);
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitRecognition;
+    if (!SpeechRecognition && !(window as any).webkitSpeechRecognition) { alert("Voice recognition not supported."); return; }
+    const Recognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (isListening) { setIsListening(false); return; }
+    const recognition = new Recognition();
     recognition.lang = 'en-US, sw-KE';
     recognition.onstart = () => setIsListening(true);
     recognition.onend = () => setIsListening(false);
@@ -52,15 +83,32 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
     recognition.start();
   };
 
-  const handleSend = async (forcedText?: string) => {
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64 = reader.result as string;
+      handleSend(undefined, base64);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSend = async (forcedText?: string, imageBase64?: string) => {
+    if (showConsentModal) {
+      alert("Please accept the privacy terms first.");
+      return;
+    }
+
     const text = forcedText || inputValue;
-    if (!text.trim() || isLoading) return;
+    if (!text.trim() && !imageBase64 && !isLoading) return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content: text,
-      timestamp: Date.now()
+      content: imageBase64 ? "Scanning document..." : text,
+      timestamp: Date.now(),
+      imageContent: imageBase64
     };
 
     setMessages(prev => [...prev, userMessage]);
@@ -68,95 +116,85 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
     setIsLoading(true);
 
     try {
-      const parsed = await parseTransactionMessage(text);
+      let result: ParsingResult;
+      if (imageBase64) {
+        result = await parseReceiptImage(imageBase64);
+      } else {
+        result = await parseTransactionMessage(text, transactions);
+      }
       
-      if (parsed && parsed.amount && parsed.item) {
-        const itemKey = parsed.item.toLowerCase().trim();
-        const available = inventoryLevels[itemKey] || 0;
-        const requested = parsed.quantity || 1;
+      let aiContent = "";
+      let status: Message['status'] = 'completed';
 
+      if (result.status === 'complete' && result.transactions && result.transactions.length > 0) {
+        let successCount = 0;
+        let errors: string[] = [];
+        result.transactions.forEach((parsed, index) => {
+          const newTx: Transaction = {
+            id: `tx-${Date.now()}-${index}`,
+            timestamp: Date.now(),
+            amount: parsed.amount || ( (parsed.quantity || 1) * (parsed.unitPrice || 0)),
+            unitPrice: parsed.unitPrice,
+            quantity: parsed.quantity,
+            currency: parsed.currency || 'KES',
+            item: parsed.item!,
+            category: parsed.category as Category || (parsed.type === TransactionType.EXPENSE ? Category.INVENTORY : Category.SALES),
+            type: parsed.type as TransactionType || TransactionType.EXPENSE,
+            originalMessage: text || "Batch Scan",
+            source: 'Receipt Scan',
+          };
+          const addResult = onAddTransaction(newTx);
+          if (addResult.success) successCount++;
+          else errors.push(addResult.error || `Error adding ${newTx.item}.`);
+        });
+        aiContent = `Success! ✅ Added **${successCount}** items.`;
+        if (errors.length > 0) aiContent += `\n\n⚠️ Issues:\n- ${errors.join('\n- ')}`;
+        if (result.insight) aiContent += `\n\n💡 **AI Summary:** ${result.insight}`;
+      } 
+      else if (result.status === 'complete' && result.transaction) {
+        const parsed = result.transaction;
         const newTx: Transaction = {
           id: `tx-${Date.now()}`,
           timestamp: Date.now(),
-          amount: parsed.amount,
-          unitPrice: parsed.unitPrice,
+          amount: parsed.amount || ((parsed.quantity || 1) * (parsed.unitPrice || result.suggestedUnitPrice || 0)),
+          unitPrice: parsed.unitPrice || result.suggestedUnitPrice,
           quantity: parsed.quantity,
           currency: parsed.currency || 'KES',
-          item: parsed.item,
-          category: parsed.category || Category.OTHER,
-          type: parsed.type || TransactionType.INCOME,
-          originalMessage: text,
-          source: isListening ? 'Voice' : 'SMS',
-          tags: (parsed as any).tags || []
+          item: parsed.item!,
+          category: parsed.category || Category.INVENTORY,
+          type: parsed.type || TransactionType.EXPENSE,
+          originalMessage: text || "Manual Entry",
+          source: imageBase64 ? 'Receipt Scan' : (isListening ? 'Voice' : 'Manual'),
         };
-
-        // Pre-check for inventory shortage to give a more personalized AI response
-        if (newTx.type === TransactionType.INCOME && available < requested) {
-          const shortage = requested - available;
-          let shortageMsg = "";
-          
-          if (available <= 0) {
-            shortageMsg = `Ayayaya! Huna **${newTx.item}** hata kidogo kwa stock yako. Huwezi kuuza kitu ambacho huna! 🛑\n\n**Tip:** Nunua angalau units ${requested} uweze kuuza hii order.`;
-          } else {
-            shortageMsg = `Wait kidogo! Stock yako ya **${newTx.item}** haitoshi. Uko na units **${available}** pekee, lakini unataka kuuza **${requested}**. 📉\n\n**Suggestion:** Restock units zingine **${shortage}** ndio uweze kukamilisha hii sale ya soko.`;
-          }
-
-          const aiResponse: Message = {
-            id: `ai-${Date.now()}`,
-            role: 'assistant',
-            content: shortageMsg,
-            timestamp: Date.now(),
-            status: 'error'
-          };
-          setMessages(prev => [...prev, aiResponse]);
-          setIsLoading(false);
-          return;
-        }
-
-        const result = onAddTransaction(newTx);
-
-        if (result.success) {
-          let confirmationText = `Vitu safi! ${newTx.item} recorded for ${newTx.amount} ${newTx.currency}.`;
-          if (newTx.quantity && newTx.unitPrice) {
-            confirmationText += ` (${newTx.quantity} units @ ${newTx.unitPrice} each).`;
-          }
-
-          const aiResponse: Message = {
-            id: `ai-${Date.now()}`,
-            role: 'assistant',
-            content: confirmationText,
-            timestamp: Date.now(),
-            status: 'completed',
-            transactionId: newTx.id
-          };
-          setMessages(prev => [...prev, aiResponse]);
+        const addResult = onAddTransaction(newTx);
+        if (addResult.success) {
+          aiContent = `Sawa! Recorded **${newTx.item}** with **${newTx.quantity || 1} units**.`;
+          if (result.insight) aiContent += `\n\n💡 **Insight:** ${result.insight}`;
         } else {
-          const aiResponse: Message = {
-            id: `ai-${Date.now()}`,
-            role: 'assistant',
-            content: result.error || "Huwezi kuuza hiyo. Angalia stock yako.",
-            timestamp: Date.now(),
-            status: 'error'
-          };
-          setMessages(prev => [...prev, aiResponse]);
+          status = 'error';
+          aiContent = `**Error:** ${addResult.error}\n\n${addResult.suggestion || ''}`;
         }
+      } else if (result.status === 'incomplete') {
+        status = 'clarification';
+        aiContent = result.followUpQuestion || "Nipe details zaidi.";
       } else {
-        const aiResponse: Message = {
-          id: `ai-${Date.now()}`,
-          role: 'assistant',
-          content: "Sijaelewa hiyo message. Try: 'Purchased 10kg sugar at 150 each'",
-          timestamp: Date.now(),
-          status: 'error'
-        };
-        setMessages(prev => [...prev, aiResponse]);
+        status = 'error';
+        aiContent = "Sijaelewa hiyo. Jaribu tena.";
       }
-    } catch (error) {
-      setMessages(prev => [...prev, {
+
+      const audioBase64 = await generateSpeech(aiContent.replace(/\*\*/g, ''));
+      const aiResponse: Message = {
         id: `ai-${Date.now()}`,
         role: 'assistant',
-        content: "Error in network. Pole sana.",
-        timestamp: Date.now()
-      }]);
+        content: aiContent,
+        timestamp: Date.now(),
+        status: status,
+        audioData: audioBase64 || undefined
+      };
+      setMessages(prev => [...prev, aiResponse]);
+      if (audioBase64) playAudio(audioBase64);
+    } catch (error) {
+      setMessages(prev => [...prev, { id: `ai-${Date.now()}`, role: 'assistant', content: "API Error. Check Settings.", timestamp: Date.now() }]);
     } finally {
       setIsLoading(false);
       setIsListening(false);
@@ -165,6 +203,27 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
 
   return (
     <div className="max-w-3xl mx-auto h-full flex flex-col bg-slate-50 border-x shadow-2xl overflow-hidden relative">
+      {showConsentModal && (
+        <div className="absolute inset-0 z-50 bg-indigo-950/80 backdrop-blur-sm flex items-center justify-center p-6">
+          <div className="bg-white rounded-[2rem] p-8 max-w-sm text-center shadow-2xl space-y-4 animate-in fade-in slide-in-from-bottom-4">
+             <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
+               <ShieldCheck size={32} />
+             </div>
+             <h3 className="text-xl font-black text-slate-800">Privacy First</h3>
+             <p className="text-sm text-slate-500 leading-relaxed">
+               By using MarketMinder, you consent to sharing your ledger data with <strong>Gemini 3 AI</strong> for parsing and insights. Data is protected under Kenya's Data Protection Act.
+             </p>
+             <button 
+               onClick={handleConsent}
+               className="w-full bg-indigo-600 text-white p-4 rounded-2xl font-black uppercase text-xs shadow-lg"
+             >
+               Agree & Start Chatting
+             </button>
+             <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">You can revoke this in Settings</p>
+          </div>
+        </div>
+      )}
+
       <div className="p-4 bg-[#075e54] text-white flex items-center justify-between shadow-md">
         <div className="flex items-center gap-3">
           <div className="relative">
@@ -175,9 +234,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
           </div>
           <div>
             <h3 className="font-bold text-sm">MarketMinder Bot</h3>
-            <p className="text-[10px] text-emerald-200 uppercase tracking-tighter">Gemini 3 Powered • Online</p>
+            <p className="text-[10px] text-emerald-200 uppercase tracking-tighter">Secure AI Assistant • Online</p>
           </div>
         </div>
+        {isListening && <div className="bg-rose-500 px-3 py-1 rounded-full text-[10px] font-bold animate-pulse">LISTENING...</div>}
       </div>
 
       <div 
@@ -185,69 +245,93 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
         className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#e5ddd5] pb-24"
         style={{ backgroundImage: "url('https://www.transparenttextures.com/patterns/pinstriped-suit.png')" }}
       >
+        {isFirstTime && messages.length < 3 && (
+           <div className="flex flex-col gap-2 p-4 bg-white/80 rounded-2xl border-2 border-indigo-200 shadow-inner mb-4">
+              <p className="text-xs font-black text-indigo-600 uppercase flex items-center gap-1">
+                <Sparkles size={14} /> Shop Setup
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => handleSend("Niko na trays 50 za mayai")} className="px-3 py-1.5 bg-indigo-50 border border-indigo-100 rounded-full text-xs font-bold text-indigo-700 hover:bg-indigo-100 transition-colors">"Niko na mayai trays 50"</button>
+                <button onClick={() => handleSend("Niko na mifuko 10 ya sukari")} className="px-3 py-1.5 bg-indigo-50 border border-indigo-100 rounded-full text-xs font-bold text-indigo-700 hover:bg-indigo-100 transition-colors">"Niko na sukari mifuko 10"</button>
+              </div>
+           </div>
+        )}
         {messages.map((m) => (
           <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div className={`
-              max-w-[80%] px-4 py-2.5 shadow-sm relative
+              max-w-[85%] px-4 py-3 shadow-sm relative group
               ${m.role === 'user' 
-                ? 'bg-[#dcf8c6] text-slate-800 rounded-lg rounded-tr-none' 
-                : m.status === 'error'
-                  ? 'bg-rose-100 text-rose-800 rounded-lg border border-rose-200 shadow-rose-100'
-                  : 'bg-white text-slate-800 rounded-lg rounded-tl-none'}
+                ? 'bg-[#dcf8c6] text-slate-800 rounded-2xl rounded-tr-none' 
+                : m.status === 'clarification'
+                  ? 'bg-indigo-50 text-indigo-900 rounded-2xl rounded-tl-none border-l-4 border-indigo-400'
+                  : m.status === 'error'
+                    ? 'bg-rose-100 text-rose-800 rounded-2xl rounded-tl-none border-l-4 border-rose-400 shadow-[0_4px_0_0_#fda4af]'
+                    : 'bg-white text-slate-800 rounded-2xl rounded-tl-none'}
             `}>
-              <div className="flex items-start gap-2">
-                {m.status === 'error' && <AlertTriangle size={14} className="mt-0.5 shrink-0 text-rose-500" />}
-                <div className="text-[14px] leading-tight">
-                   {m.content.split('\n').map((line, i) => (
-                     <p key={i} className={i > 0 ? "mt-2" : ""}>
-                       {line.split('**').map((part, j) => j % 2 === 1 ? <strong key={j} className="font-black">{part}</strong> : part)}
-                     </p>
-                   ))}
+              <div className="flex flex-col gap-2">
+                {m.imageContent && (
+                  <div className="relative rounded-lg overflow-hidden border border-black/10">
+                    <img src={m.imageContent} alt="Scan preview" className="w-full max-h-64 object-cover" />
+                  </div>
+                )}
+                <div className="flex items-start gap-3">
+                  <div className="flex-1 text-[14px] leading-relaxed">
+                     {m.content.split('\n').map((line, i) => (
+                       <p key={i} className={i > 0 ? "mt-2" : ""}>
+                         {line.split('**').map((part, j) => j % 2 === 1 ? <strong key={j} className="font-black text-slate-900">{part}</strong> : part)}
+                       </p>
+                     ))}
+                  </div>
+                  {m.audioData && (
+                    <button onClick={() => playAudio(m.audioData!)} className="text-indigo-500 hover:text-indigo-700 p-1 bg-slate-100 rounded-full shrink-0">
+                      <Volume2 size={16} />
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="mt-1 flex items-center justify-end gap-1 opacity-40">
                 <span className="text-[9px]">{new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                {m.role === 'assistant' && m.status === 'completed' && <CheckCircle2 size={10} />}
+                {m.role === 'assistant' && m.status === 'completed' && <CheckCircle2 size={10} className="text-emerald-600" />}
               </div>
             </div>
           </div>
         ))}
         {isLoading && (
           <div className="flex justify-start">
-             <div className="bg-white rounded-lg p-3 shadow-sm flex items-center gap-2">
-                <div className="flex gap-1">
-                  <span className="w-1.5 h-1.5 bg-slate-300 rounded-full animate-bounce"></span>
-                  <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce [animation-delay:0.2s]"></span>
-                  <span className="w-1.5 h-1.5 bg-slate-500 rounded-full animate-bounce [animation-delay:0.4s]"></span>
+             <div className="bg-white rounded-2xl p-4 shadow-sm flex items-center gap-3">
+                <div className="flex gap-1.5">
+                  <span className="w-2 h-2 bg-indigo-300 rounded-full animate-bounce"></span>
+                  <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.2s]"></span>
+                  <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:0.4s]"></span>
                 </div>
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">AI Syncing...</span>
              </div>
           </div>
         )}
       </div>
 
-      <div className="absolute bottom-0 inset-x-0 p-3 bg-white/80 backdrop-blur-md border-t flex items-center gap-2">
-        <button 
-          onClick={toggleVoice}
-          className={`p-3 rounded-full transition-all ${isListening ? 'bg-rose-500 text-white animate-pulse' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-        >
-          {isListening ? <MicOff size={22} /> : <Mic size={22} />}
-        </button>
+      <div className="absolute bottom-0 inset-x-0 p-4 bg-white/90 backdrop-blur-md border-t flex items-center gap-2">
+        <div className="flex gap-1">
+          <button onClick={toggleVoice} className={`p-3 rounded-full transition-all shadow-md ${isListening ? 'bg-rose-500 text-white animate-pulse' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>
+            {isListening ? <MicOff size={20} /> : <Mic size={20} />}
+          </button>
+          <button onClick={() => fileInputRef.current?.click()} className="p-3 bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 shadow-md transition-all">
+            <Camera size={20} />
+          </button>
+        </div>
+        <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleImageUpload} />
         <div className="flex-1 relative">
           <input 
             type="text" 
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-            placeholder={isListening ? "Listening..." : "Nimeuza trays 3 za mayai..."}
-            className="w-full py-3 px-5 rounded-full border border-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white shadow-inner text-sm"
+            placeholder={isFirstTime ? "Niko na sukari bags 10..." : "Log sale or scan stock..."}
+            className="w-full py-3 px-5 rounded-full border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#128c7e] bg-white shadow-inner text-sm font-medium"
           />
         </div>
-        <button 
-          onClick={() => handleSend()}
-          disabled={!inputValue.trim() || isLoading}
-          className="p-3 bg-[#128c7e] text-white rounded-full disabled:bg-slate-300 shadow-md hover:bg-[#075e54] transition-colors"
-        >
-          <Send size={22} />
+        <button onClick={() => handleSend()} disabled={!inputValue.trim() || isLoading} className="p-3 bg-[#128c7e] text-white rounded-full disabled:bg-slate-300 shadow-xl hover:bg-[#075e54] transition-all active:scale-95">
+          <Send size={20} />
         </button>
       </div>
     </div>

@@ -13,7 +13,7 @@ import {
   Cell,
   Legend
 } from 'recharts';
-import { Sparkles, BrainCircuit, RefreshCcw, TrendingUp, ShieldCheck, Zap, ArrowRight, Wallet } from 'lucide-react';
+import { Sparkles, BrainCircuit, RefreshCcw, TrendingUp, ShieldCheck, Zap, ArrowRight, Wallet, PieChart as PieIcon } from 'lucide-react';
 import { Transaction, TransactionType, Category } from '../types';
 import { generateInsights } from '../services/geminiService';
 
@@ -21,13 +21,11 @@ interface AnalyticsPanelProps {
   transactions: Transaction[];
 }
 
-// Simple helper to render basic markdown-like syntax (bolding and line breaks)
 const MarkdownLite: React.FC<{ text: string }> = ({ text }) => {
   const paragraphs = text.split('\n\n');
   return (
     <div className="space-y-4">
       {paragraphs.map((para, i) => {
-        // Handle basic bolding **text**
         const parts = para.split(/(\*\*.*?\*\*)/g);
         return (
           <p key={i} className="text-slate-600 text-base leading-relaxed">
@@ -48,7 +46,6 @@ const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({ transactions }) => {
   const [insights, setInsights] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
 
-  // Group by Date for Area Chart (Cash Flow History)
   const chartData = Array.from({ length: 14 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (13 - i));
@@ -60,10 +57,31 @@ const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({ transactions }) => {
 
     return { 
       name: d.toLocaleDateString([], { month: 'short', day: 'numeric' }), 
-      balance: Math.max(0, balance + 5000), // Adding mock baseline for visual
+      balance: Math.max(0, balance + 5000),
       raw: balance
     };
   });
+
+  const cogs = transactions
+    .filter(t => t.type === TransactionType.EXPENSE && t.category === Category.INVENTORY)
+    .reduce((acc, t) => acc + t.amount, 0);
+
+  const opEx = transactions
+    .filter(t => t.type === TransactionType.EXPENSE && t.category !== Category.INVENTORY)
+    .reduce((acc, t) => acc + t.amount, 0);
+
+  const revenue = transactions
+    .filter(t => t.type === TransactionType.INCOME)
+    .reduce((acc, t) => acc + t.amount, 0);
+
+  const grossProfit = revenue - cogs;
+  const netProfit = revenue - (cogs + opEx);
+
+  const pieData = [
+    { name: 'Cost of Stock', value: cogs, color: '#f43f5e' },
+    { name: 'Overheads (Rent/Fuel)', value: opEx, color: '#f59e0b' },
+    { name: 'Net Profit', value: Math.max(0, netProfit), color: '#10b981' },
+  ];
 
   const handleGenerateInsights = async () => {
     if (!transactions || transactions.length === 0) {
@@ -73,7 +91,6 @@ const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({ transactions }) => {
     
     setIsGenerating(true);
     try {
-      // Explicitly passing the current transactions array to the service
       const text = await generateInsights(transactions);
       setInsights(text);
     } catch (e) {
@@ -95,7 +112,6 @@ const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({ transactions }) => {
   return (
     <div className="space-y-6 pb-24">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Main Forecast Chart */}
         <div className="lg:col-span-2 bg-white p-6 rounded-3xl border shadow-sm h-[400px]">
           <div className="flex justify-between items-center mb-6">
             <div>
@@ -126,7 +142,6 @@ const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({ transactions }) => {
           </ResponsiveContainer>
         </div>
 
-        {/* Loan Readiness Gauge */}
         <div className="bg-indigo-900 rounded-3xl p-6 text-white shadow-xl flex flex-col justify-between overflow-hidden relative">
           <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/20 rounded-full blur-3xl -mr-16 -mt-16"></div>
           <div>
@@ -151,45 +166,71 @@ const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({ transactions }) => {
         </div>
       </div>
 
-      {/* AI Advisory Section */}
-      <div className="bg-white rounded-3xl border overflow-hidden shadow-sm">
-        <div className="bg-slate-50 p-4 border-b flex items-center justify-between">
-          <div className="flex items-center gap-3">
-             <div className="p-2 bg-indigo-600 rounded-lg">
-                <BrainCircuit size={20} className="text-white" />
-             </div>
-             <div>
-               <h3 className="font-bold text-slate-800">Gemini Business Coach</h3>
-               <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Powered by Gemini 3 Pro</p>
-             </div>
-          </div>
-          <button 
-            onClick={handleGenerateInsights}
-            disabled={isGenerating}
-            className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-indigo-600 hover:bg-indigo-50 transition-all flex items-center gap-2"
-          >
-            <RefreshCcw size={14} className={isGenerating ? 'animate-spin' : ''} />
-            {isGenerating ? 'Analyzing...' : 'Refresh Insights'}
-          </button>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="bg-white p-6 rounded-3xl border shadow-sm h-[350px]">
+           <div className="flex items-center gap-2 mb-4">
+              <PieIcon size={18} className="text-indigo-600" />
+              <h4 className="font-black text-xs uppercase tracking-widest text-slate-800">Profitability Breakdown</h4>
+           </div>
+           <ResponsiveContainer width="100%" height="70%">
+             <RPieChart>
+               <Pie
+                 data={pieData}
+                 cx="50%"
+                 cy="50%"
+                 innerRadius={60}
+                 outerRadius={80}
+                 paddingAngle={5}
+                 dataKey="value"
+               >
+                 {pieData.map((entry, index) => (
+                   <Cell key={`cell-${index}`} fill={entry.color} />
+                 ))}
+               </Pie>
+               <Tooltip />
+               <Legend verticalAlign="bottom" height={36} />
+             </RPieChart>
+           </ResponsiveContainer>
         </div>
-        <div className="p-8">
-          {isGenerating ? (
-            <div className="space-y-4 max-w-2xl">
-              <div className="h-4 bg-slate-100 rounded w-full animate-pulse"></div>
-              <div className="h-4 bg-slate-100 rounded w-5/6 animate-pulse"></div>
-              <div className="h-4 bg-slate-100 rounded w-2/3 animate-pulse"></div>
-              <div className="pt-4 flex gap-4">
-                <div className="h-20 bg-slate-50 rounded-xl w-full animate-pulse"></div>
-                <div className="h-20 bg-slate-50 rounded-xl w-full animate-pulse"></div>
-              </div>
+
+        <div className="lg:col-span-2 bg-white rounded-3xl border overflow-hidden shadow-sm">
+          <div className="bg-slate-50 p-4 border-b flex items-center justify-between">
+            <div className="flex items-center gap-3">
+               <div className="p-2 bg-indigo-600 rounded-lg">
+                  <BrainCircuit size={20} className="text-white" />
+               </div>
+               <div>
+                 <h3 className="font-bold text-slate-800">Gemini Business Coach</h3>
+                 <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Powered by Gemini 3 Pro</p>
+               </div>
             </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-              <div className="md:col-span-2">
-                <h4 className="text-indigo-600 font-black text-xs uppercase tracking-widest mb-4 flex items-center gap-2">
-                   <Zap size={16} />
-                   Market Strategy & Insights
-                </h4>
+            <button 
+              onClick={handleGenerateInsights}
+              disabled={isGenerating}
+              className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-indigo-600 hover:bg-indigo-50 transition-all flex items-center gap-2"
+            >
+              <RefreshCcw size={14} className={isGenerating ? 'animate-spin' : ''} />
+              {isGenerating ? 'Analyzing...' : 'Refresh Insights'}
+            </button>
+          </div>
+          <div className="p-8">
+            {isGenerating ? (
+              <div className="space-y-4 max-w-2xl">
+                <div className="h-4 bg-slate-100 rounded w-full animate-pulse"></div>
+                <div className="h-4 bg-slate-100 rounded w-5/6 animate-pulse"></div>
+                <div className="h-4 bg-slate-100 rounded w-2/3 animate-pulse"></div>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                <div className="flex items-center gap-4 bg-indigo-50 p-4 rounded-2xl border border-indigo-100">
+                  <div className="p-3 bg-white rounded-xl shadow-sm">
+                    <Zap className="text-indigo-600" size={24} />
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-black uppercase text-indigo-400">Top Insight</p>
+                    <p className="text-sm font-bold text-indigo-900">Your current gross margin is {((grossProfit / revenue) * 100).toFixed(1)}%. Aim for 35% by optimizing maize stock buying.</p>
+                  </div>
+                </div>
                 <div className="bg-white border-l-4 border-indigo-500 pl-6 py-2">
                   {insights ? (
                     <MarkdownLite text={insights} />
@@ -198,29 +239,8 @@ const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({ transactions }) => {
                   )}
                 </div>
               </div>
-              <div className="bg-emerald-50 p-6 rounded-3xl border border-emerald-100 h-fit">
-                <h4 className="text-emerald-700 font-bold mb-4 flex items-center gap-2">
-                  <ShieldCheck size={18} />
-                  Compliance & Sync
-                </h4>
-                <div className="space-y-3">
-                   <div className="flex justify-between items-center text-sm">
-                      <span className="text-emerald-600 font-medium">M-Pesa Statements</span>
-                      <span className="text-emerald-800 font-bold bg-white px-2 py-0.5 rounded-full text-[10px]">VERIFIED</span>
-                   </div>
-                   <div className="flex justify-between items-center text-sm">
-                      <span className="text-emerald-600 font-medium">VAT / KRA Status</span>
-                      <span className="text-slate-500 font-bold text-[10px]">PENDING</span>
-                   </div>
-                   <div className="h-px bg-emerald-200 my-4"></div>
-                   <button className="w-full bg-white border border-emerald-200 text-emerald-700 py-3 rounded-2xl text-xs font-black hover:bg-emerald-100 transition-all flex items-center justify-center gap-2 shadow-sm">
-                      <RefreshCcw size={14} />
-                      Sync Tax Portal
-                   </button>
-                </div>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
     </div>

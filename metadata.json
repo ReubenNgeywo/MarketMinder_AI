@@ -2,6 +2,7 @@
   "name": "MarketMinder AI - Nairobi Conversational ERP",
   "description": "A conversational ERP for informal traders. Manage sales, inventory, and expenses using natural language and AI insights powered by Gemini 3.",
   "requestFramePermissions": [
-    "microphone"
+    "microphone",
+    "camera"
   ]
 }
