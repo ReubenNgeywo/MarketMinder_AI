@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { Shield, Lock, Globe, Database, Download, Trash2, Save, User, Bell, ShieldCheck, History, AlertCircle } from 'lucide-react';
+import { Shield, Globe, Database, Download, Trash2, Save, User, ShieldCheck, AlertCircle } from 'lucide-react';
 import { UserSettings, Transaction } from '../types';
 
 interface SettingsPageProps {
@@ -35,20 +35,27 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ settings, transactions, onU
       mimeType = "application/json";
       extension = "json";
     } else {
-      const headers = ['ID', 'Date', 'Item', 'Type', 'Category', 'Quantity', 'Unit Price', 'Total Amount', 'Currency', 'Source', 'Original Message'];
-      const rows = transactions.map(tx => [
-        tx.id,
-        new Date(tx.timestamp).toLocaleString(),
-        `"${tx.item.replace(/"/g, '""')}"`,
-        tx.type,
-        tx.category,
-        tx.quantity || '',
-        tx.unitPrice || '',
-        tx.amount,
-        tx.currency,
-        tx.source,
-        `"${tx.originalMessage.replace(/"/g, '""')}"`
-      ]);
+      const headers = ['ID', 'Date', 'Time', 'Item', 'Type', 'Category', 'Quantity', 'Unit Price', 'Total Amount', 'Currency', 'Source', 'Original Message'];
+      const rows = transactions.map(tx => {
+        const d = new Date(tx.timestamp);
+        const datePart = d.toLocaleDateString();
+        const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        
+        return [
+          `"${tx.id}"`,
+          `"${datePart}"`,
+          `"${timePart}"`,
+          `"${tx.item.replace(/"/g, '""')}"`,
+          `"${tx.type}"`,
+          `"${tx.category}"`,
+          `"${tx.quantity || ''}"`,
+          `"${tx.unitPrice || ''}"`,
+          `"${tx.amount}"`,
+          `"${tx.currency}"`,
+          `"${tx.source}"`,
+          `"${(tx.originalMessage || "").replace(/"/g, '""')}"`
+        ];
+      });
       content = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
       mimeType = "text/csv";
       extension = "csv";
@@ -85,7 +92,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ settings, transactions, onU
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="md:col-span-2 space-y-6">
-          {/* Shop Profile */}
           <section className="bg-white rounded-3xl border p-6 shadow-sm space-y-4">
             <div className="flex items-center gap-2 mb-2">
               <User className="text-indigo-600" size={20} />
@@ -113,30 +119,32 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ settings, transactions, onU
             </div>
           </section>
 
-          {/* Localization */}
-          <section className="bg-white rounded-3xl border p-6 shadow-sm space-y-4">
+          <section className="bg-white rounded-3xl border p-6 shadow-sm space-y-6">
             <div className="flex items-center gap-2 mb-2">
               <Globe className="text-indigo-600" size={20} />
-              <h3 className="font-bold text-slate-800">Interface & Language</h3>
+              <h3 className="font-bold text-slate-800">Interface</h3>
             </div>
-            <div className="flex flex-wrap gap-2">
-              {['English', 'Swahili', 'Sheng'].map((lang) => (
-                <button
-                  key={lang}
-                  onClick={() => setLocalSettings({...localSettings, preferredLanguage: lang as any})}
-                  className={`px-6 py-3 rounded-xl text-sm font-bold transition-all border ${
-                    localSettings.preferredLanguage === lang 
-                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' 
-                    : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
-                  }`}
-                >
-                  {lang}
-                </button>
-              ))}
+            
+            <div className="space-y-4">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Language</label>
+              <div className="flex flex-wrap gap-2">
+                {['English', 'Swahili', 'Sheng'].map((lang) => (
+                  <button
+                    key={lang}
+                    onClick={() => setLocalSettings({...localSettings, preferredLanguage: lang as any})}
+                    className={`px-6 py-3 rounded-xl text-sm font-bold transition-all border ${
+                      localSettings.preferredLanguage === lang 
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' 
+                      : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    {lang}
+                  </button>
+                ))}
+              </div>
             </div>
           </section>
 
-          {/* Data & Privacy */}
           <section className="bg-white rounded-3xl border p-6 shadow-sm space-y-6">
             <div className="flex items-center gap-2 mb-2">
               <Shield className="text-indigo-600" size={20} />
@@ -194,9 +202,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ settings, transactions, onU
              <p className="text-xs text-amber-800 leading-relaxed mb-4">
                 MarketMinder is built to comply with the <strong>Kenya Data Protection Act (2019)</strong>. Your financial records are encrypted locally and only shared with Gemini 3 for authorized analytics.
              </p>
-             <button className="text-xs font-bold text-amber-900 flex items-center gap-1 hover:underline">
-               Read Privacy Policy <Download size={12} />
-             </button>
           </div>
 
           <div className="bg-white rounded-3xl border p-6 shadow-sm space-y-4">

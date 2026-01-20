@@ -1,53 +1,34 @@
+import { GoogleGenAI, Type } from "@google/genai";
+import { Transaction, TransactionType, Category, ParsingResult, PaymentMethod, TradeUnit } from "../types";
 
-import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { Transaction, TransactionType, Category, ParsingResult } from "../types";
-
-// Standard Nairobi Trade Conversion Factors
 const UNIT_CONVERSIONS = `
-Conversion Rules (Normalize to Base Units):
-- EGGS: 1 Tray = 30 Pieces. (Base: PIECE)
-- SUGAR/RICE/MAIZE: 1 Bag = 50 KG or 25 KG as specified. (Base: KG)
-- MILK: 1 Crate = 12 Packets. (Base: PACKET)
-- BREAD: 1 Bale = 20 Loaves. (Base: LOAF)
-- SODA: 1 Case = 24 Bottles. (Base: BOTTLE)
+Standard Nairobi Trade Conversion Rules (MANDATORY SMALLEST UNIT BREAKDOWN):
+1. EGGS: 1 Tray = 30 PCS. If someone says "1 Tray @ 600", record as 30 PCS @ 20.
+2. MILK: 1 Crate = 12 PCS.
+3. BREAD: 1 Bale = 20 PCS.
+4. SUGAR/RICE: Always convert Bags to KG (1 Bag = 50KG, Small Bag = 25KG). If "1 Bag 50kg @ 5000", record as 50 KG @ 100.
+`;
+
+const DUPLICATE_CHECK_INSTRUCTION = `
+DUPLICATE DETECTION RULES:
+- Compare the current items against the provided "Recent History".
+- If an item has the SAME name, quantity, and approximate price as a record from the LAST 24 HOURS, flag it as a duplicate.
 `;
 
 export const parseTransactionMessage = async (message: string, history: Transaction[] = []): Promise<ParsingResult> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
-  const inventorySummary: Record<string, { qty: number, lastCost: number }> = {};
-  history.forEach(tx => {
-    const key = tx.baseItem.toUpperCase().trim();
-    if (!inventorySummary[key]) inventorySummary[key] = { qty: 0, lastCost: 0 };
-    
-    if (tx.type === TransactionType.EXPENSE && tx.category === Category.INVENTORY) {
-      const qty = tx.quantity || 1;
-      inventorySummary[key].qty += qty;
-      if (tx.unitPrice) inventorySummary[key].lastCost = tx.unitPrice;
-    } else if (tx.type === TransactionType.INCOME) {
-      const qty = tx.quantity || 1;
-      inventorySummary[key].qty -= qty;
-    }
-  });
-
-  const stockContext = Object.entries(inventorySummary)
-    .map(([item, data]) => `${item}: ${data.qty} base units in stock (Last Cost per base unit: KES ${data.lastCost})`)
-    .join('\n');
+  const recentHistory = history.filter(t => (Date.now() - t.timestamp) < 86400000);
+  const historyContext = recentHistory.map(t => 
+    `${t.type}: ${t.quantity} ${t.unit} of ${t.item} at ${t.unitPrice} KES`
+  ).join('\n');
 
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: `Parse this potentially multi-item message: "${message}". 
-    
-    Current Inventory (in Base Units):
-    ${stockContext || 'No items in stock.'}
-
+    contents: `Parse: "${message}". 
+    Recent History: ${historyContext || 'None.'}
     ${UNIT_CONVERSIONS}
-
-    Instructions:
-    1. Extract ALL line items mentioned in the message. 
-    2. NORMALIZATION: Convert everything to smallest base units (KG, PIECE, etc).
-    3. LOSS PREVENTION: Compare the base unit sale price for EACH item against its 'Last Cost'.
-    4. If multiple items are present, return them in the 'transactions' array.`,
+    ${DUPLICATE_CHECK_INSTRUCTION}`,
     config: {
       responseMimeType: "application/json",
       responseSchema: {
@@ -61,46 +42,49 @@ export const parseTransactionMessage = async (message: string, history: Transact
               type: Type.OBJECT,
               properties: {
                 totalAmount: { type: Type.NUMBER },
-                unitPrice: { type: Type.NUMBER },
-                purchasePrice: { type: Type.NUMBER },
-                quantity: { type: Type.NUMBER },
+                unitPrice: { type: Type.NUMBER, description: "Calculated unit price (Total / Quantity)" },
+                costPrice: { type: Type.NUMBER, description: "Buying price per smallest unit" },
+                sellingPrice: { type: Type.NUMBER, description: "Intended selling price per smallest unit" },
+                quantity: { type: Type.NUMBER, description: "Total quantity in smallest units" },
                 item: { type: Type.STRING },
+                isAlreadyLogged: { type: Type.BOOLEAN },
+                originalSnippet: { type: Type.STRING },
                 baseItem: { type: Type.STRING },
-                unit: { type: Type.STRING },
+                unit: { type: Type.STRING, enum: ['PCS', 'KG', 'LITRE'] },
                 type: { type: Type.STRING, enum: ['Income', 'Expense'] },
-                isLossAlert: { type: Type.BOOLEAN },
-                insight: { type: Type.STRING }
+                paymentMethod: { type: Type.STRING, enum: ['Cash', 'M-Pesa', 'Bank', 'Credit'] }
               }
             }
-          },
-          insight: { type: Type.STRING }
+          }
         },
         required: ["status"]
       },
-      systemInstruction: "You are a Nairobi ERP Expert. You handle multi-item messages from traders. Break them down into clean transaction objects."
+      systemInstruction: "Expert Trade Auditor. Break down all bulk items into smallest units. If a total is given, calculate the unit price automatically (unitPrice = totalAmount / quantity)."
     }
   });
 
   try {
     const data = JSON.parse(response.text || '{}');
     if (data.status === 'complete' && data.transactions) {
-      // Return normalized transaction objects
       return {
         status: data.status,
         transactions: data.transactions.map((t: any) => ({
           amount: t.totalAmount || (t.quantity * t.unitPrice),
-          unitPrice: t.unitPrice,
+          unitPrice: t.unitPrice || (t.totalAmount / (t.quantity || 1)),
+          costPrice: t.costPrice || (t.type === 'Expense' ? (t.unitPrice || t.totalAmount / (t.quantity || 1)) : undefined),
+          sellingPrice: t.sellingPrice || (t.type === 'Income' ? (t.unitPrice || t.totalAmount / (t.quantity || 1)) : undefined),
           quantity: t.quantity,
           currency: 'KES',
           item: t.item,
           baseItem: t.baseItem || t.item.toUpperCase(),
-          unit: t.unit || 'pcs',
+          unit: t.unit || TradeUnit.PIECE,
+          isDuplicate: t.isAlreadyLogged,
+          paymentMethod: (t.paymentMethod as PaymentMethod) || PaymentMethod.CASH,
           category: t.type === 'Income' ? Category.SALES : Category.INVENTORY,
           type: t.type as TransactionType,
-          insight: t.insight,
-          isLossAlert: t.isLossAlert
-        })),
-        insight: data.insight
+          originalMessage: t.originalSnippet || message,
+          source: 'SMS'
+        }))
       };
     }
     return { status: data.status, followUpQuestion: data.followUpQuestion };
@@ -109,14 +93,16 @@ export const parseTransactionMessage = async (message: string, history: Transact
   }
 };
 
-export const parseReceiptImage = async (base64Image: string): Promise<ParsingResult> => {
+export const parseReceiptFile = async (base64Data: string, mimeType: string, history: Transaction[] = []): Promise<ParsingResult> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const base64Clean = base64Data.split(',')[1] || base64Data;
+
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
     contents: {
       parts: [
-        { inlineData: { mimeType: 'image/jpeg', data: base64Image.split(',')[1] || base64Image } },
-        { text: `Extract transactions. ${UNIT_CONVERSIONS} Always normalize to base units (KG, PIECE, PACKET).` }
+        { inlineData: { mimeType, data: base64Clean } },
+        { text: `Scan receipt. Break down bulk items (crates/bags) into smallest units (PCS, KG). If the receipt shows a total and quantity but not a unit price, calculate it: unitPrice = line_total / quantity.` }
       ]
     },
     config: {
@@ -124,24 +110,26 @@ export const parseReceiptImage = async (base64Image: string): Promise<ParsingRes
       responseSchema: {
         type: Type.OBJECT,
         properties: {
-          status: { type: Type.STRING },
           transactions: {
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
               properties: {
                 item: { type: Type.STRING },
-                baseItem: { type: Type.STRING },
+                isAlreadyLogged: { type: Type.BOOLEAN },
+                originalSnippet: { type: Type.STRING },
                 type: { type: Type.STRING, enum: ['Income', 'Expense'] },
                 unitPrice: { type: Type.NUMBER },
+                costPrice: { type: Type.NUMBER },
+                sellingPrice: { type: Type.NUMBER },
                 quantity: { type: Type.NUMBER },
-                unit: { type: Type.STRING }
-              },
-              required: ["item", "type", "quantity", "unitPrice"]
+                unit: { type: Type.STRING, enum: ['PCS', 'KG', 'LITRE'] }
+              }
             }
           }
         }
-      }
+      },
+      systemInstruction: "Retail Specialist. Extract products from receipt. Always breakdown crates/bags into PCS/KG. Calculate the buying unit price (costPrice) for inventory and selling price for sales. If unit price isn't explicitly listed but a total is, divide total by quantity."
     }
   });
 
@@ -149,12 +137,17 @@ export const parseReceiptImage = async (base64Image: string): Promise<ParsingRes
     const data = JSON.parse(response.text || '{}');
     return {
       status: 'complete',
-      transactions: data.transactions.map((t: any) => ({
+      transactions: (data.transactions || []).map((t: any) => ({
         ...t,
-        amount: t.unitPrice * t.quantity,
+        amount: t.unitPrice * (t.quantity || 1),
+        isDuplicate: t.isAlreadyLogged,
         currency: 'KES',
+        paymentMethod: PaymentMethod.CASH,
         category: t.type === 'Income' ? Category.SALES : Category.INVENTORY,
-        type: t.type as TransactionType
+        type: t.type as TransactionType,
+        baseItem: (t.item || "Unknown").toUpperCase(),
+        originalMessage: t.originalSnippet || "Receipt Scan",
+        unit: t.unit || TradeUnit.PIECE
       }))
     };
   } catch (e) {
@@ -164,29 +157,13 @@ export const parseReceiptImage = async (base64Image: string): Promise<ParsingRes
 
 export const generateInsights = async (transactions: Transaction[]): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  const summary = transactions.slice(0, 30).map(t => `${t.type}: ${t.amount} for ${t.item} (${t.quantity} ${t.unit})`).join('\n');
+  const summary = transactions.slice(0, 30).map(t => `${t.type}: ${t.amount} for ${t.item}`).join('\n');
   const response = await ai.models.generateContent({
     model: 'gemini-3-pro-preview',
-    contents: `Analyze profit margins on retail sales vs wholesale buys. Are they selling eggs/milk at enough markup?\n\nHistory:\n${summary}`,
+    contents: `Analyze: \n${summary}`,
     config: {
-      thinkingConfig: { thinkingBudget: 15000 },
-      systemInstruction: "You are the Market King. Focus on item-level profitability."
+      systemInstruction: "Market Coach. Focus on margins, stock levels, and unit pricing tips for a Nairobi trader."
     }
   });
-  return response.text || "Keep trading to unlock insights.";
-};
-
-export const generateSpeech = async (text: string): Promise<string | null> => {
-  try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } }
-      }
-    });
-    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
-  } catch { return null; }
+  return response.text || "Keep trading.";
 };

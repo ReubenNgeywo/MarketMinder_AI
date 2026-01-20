@@ -4,6 +4,13 @@ export enum TransactionType {
   EXPENSE = 'Expense'
 }
 
+export enum PaymentMethod {
+  CASH = 'Cash',
+  MPESA = 'M-Pesa',
+  BANK = 'Bank',
+  CREDIT = 'Credit'
+}
+
 export enum Category {
   INVENTORY = 'Inventory',
   RENT = 'Rent',
@@ -14,21 +21,36 @@ export enum Category {
   CREDIT = 'Credit'
 }
 
+export enum TradeUnit {
+  PIECE = 'PCS',
+  KG = 'KG',
+  TRAY = 'TRAY',
+  BALE = 'BALE',
+  BAG = 'BAG',
+  LITRE = 'LITRE'
+}
+
 export interface Transaction {
   id: string;
   timestamp: number;
   amount: number;
   currency: string;
-  item: string; // Display name (e.g., "25kg Sugar")
-  baseItem: string; // Canonical name (e.g., "Sugar") for inventory matching
+  item: string; 
+  baseItem: string; 
   category: Category;
   type: TransactionType;
+  paymentMethod: PaymentMethod;
+  supplier?: string;
+  runningBalance?: number; 
   quantity?: number;
-  unitPrice?: number;
-  unit?: string; // e.g., "kg", "bag", "tray"
+  unitPrice?: number; // The actual price used in this specific transaction
+  costPrice?: number; // The buying price per unit (COGS)
+  sellingPrice?: number; // The target selling price per unit
+  unit?: string | TradeUnit; 
   originalMessage: string;
   source: 'SMS' | 'Voice' | 'M-Pesa' | 'Manual' | 'Receipt Scan';
   tags?: string[];
+  isDuplicate?: boolean;
 }
 
 export interface UserSettings {
@@ -46,8 +68,9 @@ export interface ParsingResult {
   transactions?: Partial<Transaction>[];
   followUpQuestion?: string;
   suggestedUnitPrice?: number;
-  purchasePrice?: number; // Added to track cost basis for inventory items
+  purchasePrice?: number; 
   insight?: string;
+  potentialDuplicatesFound?: boolean;
 }
 
 export interface Message {
@@ -58,5 +81,7 @@ export interface Message {
   status?: 'pending' | 'completed' | 'error' | 'clarification';
   transactionId?: string;
   audioData?: string;
-  imageContent?: string;
+  fileContent?: string; // Base64 data
+  fileMimeType?: string; 
+  fileName?: string;
 }

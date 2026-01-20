@@ -1,34 +1,33 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Loader2, Mic, Receipt, CheckCircle2, AlertCircle, MicOff, AlertTriangle, Volume2, PlayCircle, Lightbulb, Camera, Image as ImageIcon, X, Sparkles, ShieldCheck } from 'lucide-react';
-import { Message, Transaction, TransactionType, Category, ParsingResult } from '../types';
-import { parseTransactionMessage, parseReceiptImage, generateSpeech } from '../services/geminiService';
+import { Send, Bot, CheckCircle2, Mic, Receipt, Camera, Image as ImageIcon, X, FileText, Plus } from 'lucide-react';
+import { Message, Transaction, TransactionType, Category, PaymentMethod, UserSettings } from '../types';
+import { parseTransactionMessage, parseReceiptFile } from '../services/geminiService';
 
 interface ChatInterfaceProps {
   onAddTransaction: (tx: Transaction) => { success: boolean, error?: string, suggestion?: string };
   inventoryLevels: Record<string, number>;
   transactions: Transaction[];
+  settings: UserSettings;
+  isOnline: boolean;
 }
 
-const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, inventoryLevels, transactions }) => {
+const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, transactions, settings, isOnline }) => {
   const isFirstTime = transactions.length === 0;
-  
-  const [showConsentModal, setShowConsentModal] = useState(() => {
-    return localStorage.getItem('erp_privacy_consented') !== 'true';
-  });
-
-  const handleConsent = () => {
-    localStorage.setItem('erp_privacy_consented', 'true');
-    setShowConsentModal(false);
-  };
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
       role: 'assistant',
       content: isFirstTime 
-        ? 'Karibu! Nisaidie ku-setup duka lako. Unaweza kusema "Niko na trays 20 za mayai" au upige picha ya list yako ya stock.'
-        : 'Sasa! Use voice, text, or snap a photo of a receipt to log transactions.',
+        ? 'Karibu! Scan your receipt or just tell me what you sold. I will check for duplicates automatically.'
+        : 'Sasa! Ready to log your trade?',
       timestamp: Date.now()
     }
   ]);
@@ -36,162 +35,133 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, isLoading]);
 
-  const playAudio = async (base64Audio: string) => {
+  const startCamera = async () => {
     try {
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      }
-      const ctx = audioContextRef.current;
-      const binaryString = atob(base64Audio);
-      const len = binaryString.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) { bytes[i] = binaryString.charCodeAt(i); }
-      const dataInt16 = new Int16Array(bytes.buffer);
-      const frameCount = dataInt16.length;
-      const buffer = ctx.createBuffer(1, frameCount, 24000);
-      const channelData = buffer.getChannelData(0);
-      for (let i = 0; i < frameCount; i++) { channelData[i] = dataInt16[i] / 32768.0; }
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(ctx.destination);
-      source.start();
-    } catch (e) { console.error("Audio playback error", e); }
+      setIsAttachmentMenuOpen(false);
+      setIsCameraActive(true);
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      if (videoRef.current) videoRef.current.srcObject = stream;
+    } catch (e) {
+      alert("Could not access camera.");
+      setIsCameraActive(false);
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current?.srcObject) {
+      (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+    }
+    setIsCameraActive(false);
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current && canvasRef.current) {
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d')?.drawImage(video, 0, 0);
+      const dataUrl = canvas.toDataURL('image/jpeg');
+      stopCamera();
+      handleSend(undefined, dataUrl, 'image/jpeg');
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const base64 = event.target?.result as string;
+      handleSend(undefined, base64, file.type, file.name);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+    setIsAttachmentMenuOpen(false);
   };
 
   const toggleVoice = () => {
     const Recognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!Recognition) { alert("Voice recognition not supported."); return; }
+    if (!Recognition) return;
     if (isListening) { setIsListening(false); return; }
-    const recognition = new Recognition();
-    recognition.lang = 'en-US, sw-KE';
-    recognition.onstart = () => setIsListening(true);
-    recognition.onend = () => setIsListening(false);
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setInputValue(transcript);
-    };
-    recognition.start();
+    const rec = new Recognition();
+    rec.lang = 'en-US, sw-KE';
+    rec.onstart = () => setIsListening(true);
+    rec.onend = () => setIsListening(false);
+    rec.onresult = (e: any) => setInputValue(e.results[0][0].transcript);
+    rec.start();
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64 = reader.result as string;
-      handleSend(undefined, base64);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleSend = async (forcedText?: string, imageBase64?: string) => {
-    if (showConsentModal) {
-      alert("Please accept the privacy terms first.");
-      return;
-    }
-
+  const handleSend = async (forcedText?: string, fileBase64?: string, mimeType?: string, fileName?: string) => {
     const text = forcedText || inputValue;
-    if (!text.trim() && !imageBase64 && !isLoading) return;
+    if (!text.trim() && !fileBase64 && !isLoading) return;
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: 'user',
-      content: imageBase64 ? "Scanning document..." : text,
-      timestamp: Date.now(),
-      imageContent: imageBase64
-    };
-
-    setMessages(prev => [...prev, userMessage]);
+    setMessages(prev => [...prev, { 
+      id: Date.now().toString(), 
+      role: 'user', 
+      content: fileBase64 ? `Processing ${mimeType?.includes('pdf') ? 'PDF Document' : 'Attachment'}...` : text, 
+      timestamp: Date.now(), 
+      fileContent: fileBase64,
+      fileMimeType: mimeType,
+      fileName: fileName
+    }]);
     setInputValue('');
     setIsLoading(true);
 
     try {
-      let result: ParsingResult;
-      if (imageBase64) {
-        result = await parseReceiptImage(imageBase64);
-      } else {
-        result = await parseTransactionMessage(text, transactions);
-      }
+      const result = fileBase64 
+        ? await parseReceiptFile(fileBase64, mimeType!, transactions) 
+        : await parseTransactionMessage(text, transactions);
       
       let aiContent = "";
-      let status: Message['status'] = 'completed';
-
-      // Unified handling for multiple transactions (text or image)
       if (result.status === 'complete' && result.transactions && result.transactions.length > 0) {
-        let salesCount = 0;
-        let purchasesCount = 0;
-        let totalVal = 0;
-        let errors: string[] = [];
-        
-        result.transactions.forEach((parsed, index) => {
-          const type = parsed.type as TransactionType;
-          const newTx: Transaction = {
-            id: `tx-${Date.now()}-${index}`,
-            timestamp: Date.now(),
-            amount: parsed.amount || ( (parsed.quantity || 1) * (parsed.unitPrice || 0)),
-            unitPrice: parsed.unitPrice,
-            quantity: parsed.quantity,
-            unit: parsed.unit || 'pcs',
-            currency: parsed.currency || 'KES',
-            item: parsed.item!,
-            baseItem: parsed.baseItem || parsed.item!.toUpperCase(),
-            category: parsed.category as Category,
-            type: type,
-            originalMessage: text || "Batch Input",
-            source: imageBase64 ? 'Receipt Scan' : 'Manual',
-          };
-          
-          const addResult = onAddTransaction(newTx);
-          if (addResult.success) {
-            if (type === TransactionType.INCOME) {
-              salesCount++;
-              totalVal += newTx.amount;
-            } else {
-              purchasesCount++;
-            }
-          } else {
-            errors.push(`${newTx.item}: ${addResult.error}`);
+        const successes: string[] = [];
+        const duplicates: string[] = [];
+        const failures: string[] = [];
+
+        result.transactions.forEach((p, i) => {
+          if (p.isDuplicate) {
+            duplicates.push(p.item!);
+            return;
           }
+
+          const res = onAddTransaction({
+            id: `tx-${Date.now()}-${i}`,
+            timestamp: Date.now(),
+            amount: p.amount!,
+            unitPrice: p.unitPrice,
+            quantity: p.quantity,
+            paymentMethod: (p.paymentMethod as PaymentMethod) || PaymentMethod.CASH,
+            item: p.item!,
+            baseItem: p.baseItem || p.item!.toUpperCase(),
+            category: p.category as Category,
+            type: p.type as TransactionType,
+            originalMessage: p.originalMessage || text || fileName || "Attachment Scan",
+            source: fileBase64 ? 'Receipt Scan' : 'SMS',
+            currency: 'KES'
+          });
+
+          if (res.success) successes.push(p.item!);
+          else failures.push(`${p.item}: ${res.error}`);
         });
+
+        if (successes.length > 0) aiContent += `✅ Recorded: ${successes.join(', ')}. `;
+        if (duplicates.length > 0) aiContent += `🚫 Skipped duplicates: ${duplicates.join(', ')}. `;
+        if (failures.length > 0) aiContent += `⚠️ Errors: ${failures.join('. ')}`;
         
-        const summaryParts = [];
-        if (salesCount > 0) summaryParts.push(`✅ Added **${salesCount} sales** (Total: KES ${totalVal.toLocaleString()})`);
-        if (purchasesCount > 0) summaryParts.push(`📦 Added **${purchasesCount} stock restocks**`);
-        
-        aiContent = summaryParts.length > 0 ? summaryParts.join('\n') : "Sijafanikiwa kuongeza chochote.";
-        if (errors.length > 0) aiContent += `\n\n⚠️ **Errors:**\n- ${errors.join('\n- ')}`;
-        if (result.insight) aiContent += `\n\n💡 **Tip:** ${result.insight}`;
-      } 
-      else if (result.status === 'incomplete') {
-        status = 'clarification';
-        aiContent = result.followUpQuestion || "Nipe details zaidi.";
+        if (!aiContent) aiContent = "Everything seems to be already logged. No new items found.";
       } else {
-        status = 'error';
-        aiContent = "Sijaelewa hiyo vizuri. Jaribu tena ukitaja item, quantity na bei.";
+        aiContent = result.followUpQuestion || "Could not parse clearly. Try again?";
       }
 
-      const audioBase64 = await generateSpeech(aiContent.replace(/\*\*/g, ''));
-      const aiResponse: Message = {
-        id: `ai-${Date.now()}`,
-        role: 'assistant',
-        content: aiContent,
-        timestamp: Date.now(),
-        status: status,
-        audioData: audioBase64 || undefined
-      };
-      setMessages(prev => [...prev, aiResponse]);
-      if (audioBase64) playAudio(audioBase64);
-    } catch (error) {
-      setMessages(prev => [...prev, { id: `ai-${Date.now()}`, role: 'assistant', content: "Pole! Kuna API Error. Check your connection.", timestamp: Date.now() }]);
+      setMessages(prev => [...prev, { id: `ai-${Date.now()}`, role: 'assistant', content: aiContent, timestamp: Date.now() }]);
+    } catch (e) {
+      setMessages(prev => [...prev, { id: `ai-${Date.now()}`, role: 'assistant', content: "API Error. Check connection.", timestamp: Date.now() }]);
     } finally {
       setIsLoading(false);
       setIsListening(false);
@@ -200,139 +170,99 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onAddTransaction, invento
 
   return (
     <div className="max-w-3xl mx-auto h-full flex flex-col bg-slate-50 border-x shadow-2xl overflow-hidden relative">
-      {showConsentModal && (
-        <div className="absolute inset-0 z-50 bg-indigo-950/80 backdrop-blur-sm flex items-center justify-center p-6">
-          <div className="bg-white rounded-[2rem] p-8 max-w-sm text-center shadow-2xl space-y-4 animate-in fade-in slide-in-from-bottom-4">
-             <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
-               <ShieldCheck size={32} />
-             </div>
-             <h3 className="text-xl font-black text-slate-800">Privacy First</h3>
-             <p className="text-sm text-slate-500 leading-relaxed">
-               By using MarketMinder, you consent to sharing your ledger data with <strong>Gemini 3 AI</strong> for parsing and insights. Data is protected under Kenya's Data Protection Act.
-             </p>
-             <button 
-               onClick={handleConsent}
-               className="w-full bg-indigo-600 text-white p-4 rounded-2xl font-black uppercase text-xs shadow-lg"
-             >
-               Agree & Start Chatting
-             </button>
-             <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">You can revoke this in Settings</p>
+      <input type="file" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
+      
+      {isCameraActive && (
+        <div className="absolute inset-0 z-[60] bg-black flex flex-col items-center justify-center p-4">
+          <video ref={videoRef} autoPlay playsInline className="w-full max-h-[70vh] rounded-3xl object-cover bg-slate-800" />
+          <canvas ref={canvasRef} className="hidden" />
+          <div className="mt-8 flex gap-4">
+            <button onClick={stopCamera} className="bg-white/10 text-white p-4 rounded-full"><X /></button>
+            <button onClick={capturePhoto} className="bg-white text-indigo-900 p-8 rounded-full shadow-2xl active:scale-90 transition-transform"><Camera size={32} /></button>
           </div>
         </div>
       )}
 
-      <div className="p-4 bg-[#075e54] text-white flex items-center justify-between shadow-md">
+      <div className="p-4 bg-[#075e54] text-white flex items-center justify-between shadow-md shrink-0">
         <div className="flex items-center gap-3">
-          <div className="relative">
-            <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
-              <Bot size={22} className="text-white" />
-            </div>
-            <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-emerald-400 border-2 border-[#075e54] rounded-full animate-pulse"></div>
-          </div>
+          <div className="bg-white/10 p-2 rounded-full"><Bot size={22} /></div>
           <div>
             <h3 className="font-bold text-sm">MarketMinder Bot</h3>
-            <p className="text-[10px] text-emerald-200 uppercase tracking-tighter">Secure AI Assistant • Online</p>
+            <p className="text-[10px] opacity-70">Anti-Duplicate System Active</p>
           </div>
         </div>
-        {isListening && <div className="bg-rose-500 px-3 py-1 rounded-full text-[10px] font-bold animate-pulse">LISTENING...</div>}
       </div>
 
-      <div 
-        ref={scrollRef}
-        className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#e5ddd5] pb-24"
-        style={{ backgroundImage: "url('https://www.transparenttextures.com/patterns/pinstriped-suit.png')" }}
-      >
-        {isFirstTime && messages.length < 3 && (
-           <div className="flex flex-col gap-2 p-4 bg-white/80 rounded-2xl border-2 border-indigo-200 shadow-inner mb-4">
-              <p className="text-xs font-black text-indigo-600 uppercase flex items-center gap-1">
-                <Sparkles size={14} /> Shop Setup
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <button onClick={() => handleSend("Niko na trays 50 za mayai")} className="px-3 py-1.5 bg-indigo-50 border border-indigo-100 rounded-full text-xs font-bold text-indigo-700 hover:bg-indigo-100 transition-colors">"Niko na mayai trays 50"</button>
-                <button onClick={() => handleSend("Niko na mifuko 10 ya sukari")} className="px-3 py-1.5 bg-indigo-50 border border-indigo-100 rounded-full text-xs font-bold text-indigo-700 hover:bg-indigo-100 transition-colors">"Niko na sukari mifuko 10"</button>
-              </div>
-           </div>
-        )}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#e5ddd5]" style={{ backgroundImage: "url('https://www.transparenttextures.com/patterns/pinstriped-suit.png')" }}>
         {messages.map((m) => (
           <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`
-              max-w-[85%] px-4 py-3 shadow-sm relative group
-              ${m.role === 'user' 
-                ? 'bg-[#dcf8c6] text-slate-800 rounded-2xl rounded-tr-none' 
-                : m.status === 'clarification'
-                  ? 'bg-indigo-50 text-indigo-900 rounded-2xl rounded-tl-none border-l-4 border-indigo-400'
-                  : m.status === 'error'
-                    ? 'bg-rose-100 text-rose-800 rounded-2xl rounded-tl-none border-l-4 border-rose-400 shadow-[0_4px_0_0_#fda4af]'
-                    : 'bg-white text-slate-800 rounded-2xl rounded-tl-none'}
-            `}>
-              <div className="flex flex-col gap-2">
-                {m.imageContent && (
-                  <div className="relative rounded-lg overflow-hidden border border-black/10">
-                    <img src={m.imageContent} alt="Scan preview" className="w-full max-h-64 object-cover" />
-                  </div>
-                )}
-                <div className="flex items-start gap-3">
-                  <div className="flex-1 text-[14px] leading-relaxed">
-                     {m.content.split('\n').map((line, i) => (
-                       <p key={i} className={i > 0 ? "mt-2" : ""}>
-                         {line.split('**').map((part, j) => j % 2 === 1 ? <strong key={j} className="font-black text-slate-900">{part}</strong> : part)}
-                       </p>
-                     ))}
-                  </div>
-                  {m.audioData && (
-                    <button onClick={() => playAudio(m.audioData!)} className="text-indigo-500 hover:text-indigo-700 p-1 bg-slate-100 rounded-full shrink-0">
-                      <Volume2 size={16} />
-                    </button>
+            <div className={`max-w-[85%] px-4 py-2.5 shadow-sm rounded-2xl relative ${m.role === 'user' ? 'bg-[#dcf8c6]' : 'bg-white'}`}>
+              {m.fileContent && (
+                <div className="mb-2">
+                  {m.fileMimeType?.includes('pdf') ? (
+                    <div className="bg-white/50 border border-slate-200 rounded-xl p-3 flex items-center gap-3">
+                      <div className="bg-rose-100 text-rose-600 p-2 rounded-lg"><FileText size={20} /></div>
+                      <div className="truncate">
+                        <p className="text-[10px] font-black uppercase text-slate-400">PDF Document</p>
+                        <p className="text-xs font-bold truncate">{m.fileName || 'document.pdf'}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <img src={m.fileContent} className="w-full rounded-lg" alt="Attachment" />
                   )}
                 </div>
-              </div>
-              <div className="mt-1 flex items-center justify-end gap-1 opacity-40">
-                <span className="text-[9px]">{new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                {m.role === 'assistant' && m.status === 'completed' && <CheckCircle2 size={10} className="text-emerald-600" />}
+              )}
+              <p className="text-sm leading-relaxed text-slate-800">{m.content}</p>
+              <div className="flex items-center justify-end gap-1 mt-1">
+                <span className="text-[8px] opacity-50 block uppercase font-bold">
+                  {new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
+                {m.role === 'user' && <CheckCircle2 size={10} className="text-emerald-500" />}
               </div>
             </div>
           </div>
         ))}
         {isLoading && (
           <div className="flex justify-start">
-             <div className="bg-white rounded-2xl p-4 shadow-sm flex items-center gap-3">
-                <div className="flex gap-1.5">
-                  <span className="w-2 h-2 bg-indigo-300 rounded-full animate-bounce"></span>
-                  <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.2s]"></span>
-                  <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:0.4s]"></span>
-                </div>
-                <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">AI Syncing...</span>
-             </div>
+            <div className="bg-white px-4 py-2 rounded-2xl shadow-sm flex items-center gap-2">
+              <div className="flex gap-1">
+                <div className="w-1.5 h-1.5 bg-slate-300 rounded-full animate-bounce"></div>
+                <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                <div className="w-1.5 h-1.5 bg-slate-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+              </div>
+            </div>
           </div>
         )}
       </div>
 
-      <div className="absolute bottom-0 inset-x-0 p-4 bg-white/90 backdrop-blur-md border-t flex items-center gap-2">
-        <div className="flex gap-1">
-          <button onClick={toggleVoice} className={`p-3 rounded-full transition-all shadow-md ${isListening ? 'bg-rose-500 text-white animate-pulse' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>
-            {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-          </button>
-          <button onClick={() => fileInputRef.current?.click()} className="p-3 bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 shadow-md transition-all">
-            <Camera size={20} />
-          </button>
+      {isAttachmentMenuOpen && (
+        <div ref={menuRef} className="absolute bottom-24 left-4 z-40 bg-white rounded-[2rem] shadow-2xl p-6 grid grid-cols-3 gap-6 border animate-in slide-in-from-bottom-5 duration-200">
+          <AttachmentButton onClick={startCamera} icon={<Camera className="text-white" size={24} />} label="Camera" color="bg-emerald-500" />
+          <AttachmentButton onClick={() => { setIsAttachmentMenuOpen(false); fileInputRef.current!.accept = 'image/*'; fileInputRef.current!.click(); }} icon={<ImageIcon className="text-white" size={24} />} label="Gallery" color="bg-indigo-600" />
+          <AttachmentButton onClick={() => { setIsAttachmentMenuOpen(false); fileInputRef.current!.accept = 'application/pdf'; fileInputRef.current!.click(); }} icon={<FileText className="text-white" size={24} />} label="Document" color="bg-rose-500" />
         </div>
-        <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleImageUpload} />
-        <div className="flex-1 relative">
-          <input 
-            type="text" 
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-            placeholder={isFirstTime ? "Niko na sukari bags 10..." : "Log sale or scan stock..."}
-            className="w-full py-3 px-5 rounded-full border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#128c7e] bg-white shadow-inner text-sm font-medium"
-          />
+      )}
+
+      <div className="p-2 bg-white flex items-center gap-2 shrink-0 h-16">
+        <button onClick={() => setIsAttachmentMenuOpen(!isAttachmentMenuOpen)} className={`h-11 w-11 flex items-center justify-center rounded-full transition-all border shrink-0 ${isAttachmentMenuOpen ? 'bg-slate-100 text-slate-700 border-slate-200' : 'text-slate-500 hover:bg-slate-50 border-transparent'}`}>
+          {isAttachmentMenuOpen ? <X size={24} /> : <Plus size={24} />}
+        </button>
+        <div className="flex-1 bg-slate-100 rounded-full flex items-center px-4 h-11">
+          <input type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSend()} placeholder="Log a sale or upload receipt..." className="flex-1 bg-transparent border-none text-[15px] outline-none px-3 py-1 text-slate-800 placeholder:text-slate-400" />
         </div>
-        <button onClick={() => handleSend()} disabled={!inputValue.trim() || isLoading} className="p-3 bg-[#128c7e] text-white rounded-full disabled:bg-slate-300 shadow-xl hover:bg-[#075e54] transition-all active:scale-95">
-          <Send size={20} />
+        <button onClick={inputValue.trim() || isLoading ? () => handleSend() : toggleVoice} className={`h-11 w-11 flex items-center justify-center rounded-full shadow-md active:scale-90 transition-all shrink-0 ${isListening ? 'bg-rose-500 text-white animate-pulse' : 'bg-[#128c7e] text-white'}`}>
+          {inputValue.trim() || isLoading ? <Send size={20} /> : <Mic size={20} />}
         </button>
       </div>
     </div>
   );
 };
+
+const AttachmentButton = ({ onClick, icon, label, color }: { onClick: () => void, icon: React.ReactNode, label: string, color: string }) => (
+  <button onClick={onClick} className="flex flex-col items-center gap-2 group">
+    <div className={`p-4 rounded-full ${color} shadow-lg transition-transform group-hover:scale-110 group-active:scale-95`}>{icon}</div>
+    <span className="text-[11px] font-bold text-slate-500 uppercase tracking-tighter">{label}</span>
+  </button>
+);
 
 export default ChatInterface;

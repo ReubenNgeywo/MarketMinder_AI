@@ -4,7 +4,7 @@ import { HashRouter, Routes, Route, Link, useLocation, Navigate } from 'react-ro
 import { 
   LayoutDashboard, MessageSquare, Receipt, PieChart, PlusCircle, 
   Menu, X, Lock, WifiOff, Wifi, CloudOff, Keyboard, RefreshCw,
-  Settings
+  Settings, Undo2
 } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import ChatInterface from './components/ChatInterface';
@@ -12,13 +12,13 @@ import LedgerTable from './components/LedgerTable';
 import AnalyticsPanel from './components/AnalyticsPanel';
 import SettingsPage from './components/SettingsPage';
 import TransactionModal from './components/TransactionModal';
-import { Transaction, TransactionType, Category, UserSettings } from './types';
+import { Transaction, TransactionType, Category, UserSettings, PaymentMethod, TradeUnit } from './types';
 
 const App: React.FC = () => {
-  const [transactions, setTransactions] = useState<Transaction[]>((() => {
+  const [transactions, setTransactions] = useState<Transaction[]>(() => {
     const saved = localStorage.getItem('erp_transactions');
     return saved ? JSON.parse(saved) : [];
-  })());
+  });
 
   const [settings, setSettings] = useState<UserSettings>(() => {
     const saved = localStorage.getItem('erp_settings');
@@ -38,6 +38,10 @@ const App: React.FC = () => {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isManualModalOpen, setManualModalOpen] = useState(false);
+  
+  // Undo State
+  const [recentlyDeleted, setRecentlyDeleted] = useState<{ tx: Transaction; index: number } | null>(null);
+  const [showUndoToast, setShowUndoToast] = useState(false);
 
   useEffect(() => {
     const handleOnline = () => {
@@ -54,6 +58,26 @@ const App: React.FC = () => {
     };
   }, []);
 
+  // System Calculation: Maintain a map of the last buying price for every item
+  const costBasisMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    [...transactions].sort((a, b) => a.timestamp - b.timestamp).forEach(tx => {
+      if (tx.type === TransactionType.EXPENSE && tx.category === Category.INVENTORY && tx.unitPrice) {
+        map[(tx.baseItem || tx.item).toUpperCase().trim()] = tx.unitPrice;
+      }
+    });
+    return map;
+  }, [transactions]);
+
+  const transactionsWithBalance = useMemo(() => {
+    let balance = 0;
+    return [...transactions].sort((a, b) => a.timestamp - b.timestamp).map(tx => {
+      const delta = tx.type === TransactionType.INCOME ? tx.amount : -tx.amount;
+      balance += delta;
+      return { ...tx, runningBalance: balance };
+    }).reverse();
+  }, [transactions]);
+
   useEffect(() => {
     localStorage.setItem('erp_transactions', JSON.stringify(transactions));
   }, [transactions]);
@@ -65,8 +89,8 @@ const App: React.FC = () => {
 
   const inventoryLevels = useMemo(() => {
     const levels: Record<string, number> = {};
-    [...transactions].reverse().forEach(tx => {
-      const key = (tx.baseItem || tx.item).toLowerCase().trim();
+    transactions.forEach(tx => {
+      const key = (tx.baseItem || tx.item).toUpperCase().trim();
       const qty = tx.quantity || 1;
       if (!levels[key]) levels[key] = 0;
       if (tx.type === TransactionType.EXPENSE && tx.category === Category.INVENTORY) {
@@ -78,12 +102,11 @@ const App: React.FC = () => {
     return levels;
   }, [transactions]);
 
-  const costBasisMap = useMemo(() => {
-    const map: Record<string, number> = {};
-    [...transactions].reverse().forEach(tx => {
-      if (tx.type === TransactionType.EXPENSE && tx.category === Category.INVENTORY && tx.unitPrice) {
-        map[tx.baseItem.toUpperCase().trim()] = tx.unitPrice;
-      }
+  const unitMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    [...transactions].sort((a, b) => a.timestamp - b.timestamp).forEach(tx => {
+      const key = (tx.baseItem || tx.item).toUpperCase().trim();
+      if (tx.unit) map[key] = tx.unit;
     });
     return map;
   }, [transactions]);
@@ -91,46 +114,90 @@ const App: React.FC = () => {
   const addTransaction = useCallback((newTx: Transaction): { success: boolean, error?: string, suggestion?: string } => {
     const key = (newTx.baseItem || newTx.item).toUpperCase().trim();
     
+    // Strict Duplicate Prevention: Improved accuracy check
+    const isDuplicate = transactions.some(t => {
+      const sameItem = (t.baseItem || t.item).toUpperCase().trim() === key;
+      const sameAmount = Math.abs(t.amount - newTx.amount) < 0.1; // Float safety
+      const sameQty = t.quantity === newTx.quantity;
+      const sameType = t.type === newTx.type;
+      const timeWindow = Math.abs(t.timestamp - newTx.timestamp) < 3600000; // 1 Hour window
+      // Only treat as duplicate if all core parameters match within the time window
+      return sameItem && sameAmount && sameQty && sameType && timeWindow;
+    });
+
+    if (isDuplicate) {
+      return { 
+        success: false, 
+        error: `Iko tayari kwa rekodi zako!`,
+        suggestion: `The same entry for "${newTx.item}" was logged less than an hour ago. If this is a separate trade, please wait a bit or adjust the note.`
+      };
+    }
+
+    // System Calculation of Buying Price (costPrice)
+    const systemBuyingPrice = costBasisMap[key] || 0;
+
     if (newTx.type === TransactionType.INCOME) {
-      const available = inventoryLevels[key.toLowerCase()] || 0;
+      // Logic for Sales: Ensure we have stock and check for losses
+      const available = inventoryLevels[key] || 0;
       if (available < (newTx.quantity || 1)) {
         return { 
           success: false, 
-          error: `Huna stock ya kutosha kwa ${newTx.baseItem || newTx.item}! Available: ${available}`,
-          suggestion: `Did you buy more and forget to log the purchase?`
+          error: `Huna stock ya kutosha kwa "${newTx.item}"!`,
+          suggestion: `Current stock: ${available} ${newTx.unit || 'PCS'}. Please log a purchase or restock first.`
         };
       }
 
-      const lastCost = costBasisMap[key];
-      if (lastCost && newTx.unitPrice && newTx.unitPrice < lastCost) {
+      // Profit Safety: Only block if user is definitely losing money compared to cost basis
+      if (systemBuyingPrice > 0 && newTx.unitPrice && newTx.unitPrice < systemBuyingPrice) {
         return {
           success: false,
-          error: `LOSS DETECTED! Unauza kwa KES ${newTx.unitPrice}, lakini ulinunua kwa KES ${lastCost}.`,
-          suggestion: `To protect your business, I have blocked this sale. Increase price or check your records.`
+          error: `UNAPATA HASARA! (Loss Detected)`,
+          suggestion: `Buying price for "${newTx.item}" is KES ${systemBuyingPrice.toLocaleString()}, but you're selling at KES ${newTx.unitPrice.toLocaleString()}. This sale is blocked to save your business.`
         };
       }
+      
+      // Inject system-calculated cost price (COGS tracking)
+      newTx.costPrice = systemBuyingPrice;
+    } else {
+      // Logic for Purchases: The current unit price becomes the buying price basis
+      newTx.costPrice = newTx.unitPrice;
     }
     
     setTransactions(prev => [newTx, ...prev]);
     return { success: true };
-  }, [inventoryLevels, costBasisMap]);
+  }, [transactions, inventoryLevels, costBasisMap]);
 
   const updateTransaction = useCallback((updatedTx: Transaction): { success: boolean, error?: string } => {
-    // Basic loss check for updates
-    if (updatedTx.type === TransactionType.INCOME) {
-      const key = (updatedTx.baseItem || updatedTx.item).toUpperCase().trim();
-      const lastCost = costBasisMap[key];
-      if (lastCost && updatedTx.unitPrice && updatedTx.unitPrice < lastCost) {
-        return {
-          success: false,
-          error: `Cannot update: Sale price (KES ${updatedTx.unitPrice}) is below cost basis (KES ${lastCost}).`
-        };
-      }
-    }
-
     setTransactions(prev => prev.map(t => t.id === updatedTx.id ? updatedTx : t));
     return { success: true };
-  }, [costBasisMap]);
+  }, []);
+
+  const deleteTransaction = useCallback((id: string) => {
+    const index = transactions.findIndex(t => t.id === id);
+    if (index !== -1) {
+      const itemToDelete = transactions[index];
+      setRecentlyDeleted({ tx: itemToDelete, index });
+      setShowUndoToast(true);
+      setTransactions(prev => prev.filter(t => t.id !== id));
+      
+      // Auto-hide toast after 5 seconds
+      setTimeout(() => {
+        setShowUndoToast(false);
+      }, 5000);
+    }
+  }, [transactions]);
+
+  const undoDelete = useCallback(() => {
+    if (recentlyDeleted) {
+      setTransactions(prev => {
+        const updated = [...prev];
+        updated.splice(recentlyDeleted.index, 0, recentlyDeleted.tx);
+        return updated;
+      });
+      setRecentlyDeleted(null);
+      setShowUndoToast(false);
+    }
+  }, [recentlyDeleted]);
 
   const handlePinSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -207,25 +274,51 @@ const App: React.FC = () => {
             </div>
           </header>
 
-          {!isOnline && (
-            <div className="bg-rose-600 text-white text-[11px] font-bold py-2 px-6 flex items-center justify-center gap-2 animate-in slide-in-from-top duration-300">
-              <CloudOff size={14} /> Local-only mode. AI features limited until reconnected.
-            </div>
-          )}
-
           <div className="flex-1 overflow-y-auto p-4 md:p-8">
             <Routes>
-              <Route path="/" element={<Dashboard transactions={transactions} inventoryLevels={inventoryLevels} settings={settings} onAddTransaction={addTransaction} />} />
-              <Route path="/chat" element={<ChatInterface onAddTransaction={addTransaction} inventoryLevels={inventoryLevels} transactions={transactions} />} />
-              <Route path="/ledger" element={<LedgerTable transactions={transactions} onDelete={(id) => setTransactions(prev => prev.filter(t => t.id !== id))} onUpdate={updateTransaction} />} />
-              <Route path="/analytics" element={<AnalyticsPanel transactions={transactions} />} />
-              <Route path="/settings" element={<SettingsPage settings={settings} transactions={transactions} onUpdateSettings={setSettings} onClearData={() => setTransactions([])} />} />
+              <Route path="/" element={<Dashboard transactions={transactionsWithBalance} inventoryLevels={inventoryLevels} unitMap={unitMap} settings={settings} onAddTransaction={addTransaction} />} />
+              <Route path="/chat" element={<ChatInterface onAddTransaction={addTransaction} inventoryLevels={inventoryLevels} transactions={transactionsWithBalance} settings={settings} isOnline={isOnline} />} />
+              <Route path="/ledger" element={<LedgerTable transactions={transactionsWithBalance} onDelete={deleteTransaction} onUpdate={updateTransaction} />} />
+              <Route path="/analytics" element={<AnalyticsPanel transactions={transactionsWithBalance} />} />
+              <Route path="/settings" element={<SettingsPage settings={settings} transactions={transactionsWithBalance} onUpdateSettings={setSettings} onClearData={() => setTransactions([])} />} />
               <Route path="*" element={<Navigate to="/" />} />
             </Routes>
           </div>
+
+          {/* Undo Notification Toast */}
+          {showUndoToast && recentlyDeleted && (
+            <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-[100] w-[90%] max-w-sm">
+               <div className="bg-indigo-950 text-white p-4 rounded-[1.5rem] shadow-2xl flex items-center justify-between border border-indigo-800 animate-in slide-in-from-bottom-10 duration-300">
+                  <div className="flex items-center gap-3">
+                     <div className="p-2 bg-rose-500 rounded-lg"><Undo2 size={18} /></div>
+                     <div>
+                        <p className="text-xs font-black uppercase tracking-widest">Deleted Record</p>
+                        <p className="text-[10px] text-indigo-300 font-bold truncate max-w-[150px]">{recentlyDeleted.tx.item} - KES {recentlyDeleted.tx.amount}</p>
+                     </div>
+                  </div>
+                  <button 
+                    onClick={undoDelete}
+                    className="bg-emerald-500 hover:bg-emerald-400 text-indigo-950 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95"
+                  >
+                    Undo
+                  </button>
+               </div>
+               {/* Progress Timer Bar */}
+               <div className="mt-1 h-1 bg-indigo-900 rounded-full overflow-hidden mx-4">
+                  <div className="h-full bg-emerald-500 animate-[undo-progress_5s_linear_forwards]" />
+               </div>
+            </div>
+          )}
         </main>
       </div>
       <TransactionModal isOpen={isManualModalOpen} onClose={() => setManualModalOpen(false)} onSave={addTransaction} costBasisMap={costBasisMap} />
+      
+      <style>{`
+        @keyframes undo-progress {
+          from { width: 100%; }
+          to { width: 0%; }
+        }
+      `}</style>
     </HashRouter>
   );
 };

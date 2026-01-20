@@ -1,5 +1,6 @@
 
-import { useState, useEffect } from 'react';
+// Fix: Added React to imports to resolve namespace issues with React.FC
+import React, { useState, useEffect } from 'react';
 import { 
   AreaChart, 
   Area, 
